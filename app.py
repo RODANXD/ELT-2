@@ -167,7 +167,7 @@ with left_col:
 
                 with st.spinner("🤖 Mapping schema with AI..."):
                     logger.info("Calling GPT to perform schema mapping.")
-                    mapping = map_schema_with_gpt(source_df, dest_schema,source_table_name,calc_method, activity_cat ,activity_subcat)
+                    mapping = map_schema_with_gpt(source_df.columns.tolist(), dest_schema,source_table_name,calc_method, activity_cat ,activity_subcat)
                     #with open("outputs/mappings.json", "r", encoding="utf-8") as f:
                     #   mapping = json.load(f)
                     logger.info("GPT-based schema mapping completed.")

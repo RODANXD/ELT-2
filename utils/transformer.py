@@ -20,6 +20,19 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
         schema_analysis = analyze_source_schema(source_df)
         logger.info(f"Source schema analysis: {schema_analysis}")
 
+        energy_type_map = {
+            'green_electricity': 1,
+            'grey_electricity': 2,
+            'natural_gas': 3,
+            'diesel': 4,
+            'gasoline': 5
+        }
+        
+        for col in source_df.columns:
+            if col.lower() in ['energy_type', 'source_type', 'emission_source', 'type']:
+                source_df['ActivityEmissionSourceID'] = source_df[col].str.lower().map(energy_type_map)
+                break
+
         source_df = drop_and_log_duplicates(source_df)
         flag_unresolved(mapping, source_df)
         transformed_data = {}
@@ -57,6 +70,10 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
         activity_subcat_df = dest_tables['DE1_ActivitySubcategory'].copy()
         scope_df = dest_tables['DE1_Scopes'].copy()
         activity_emmission_source_df = dest_tables['DE1_ActivityEmissionSource'].copy()
+
+        if 'ActivityEmissionSourceID' in source_df.columns:
+            schema_analysis['column_types']['ActivityEmissionSourceID'] = 'int64'
+            schema_analysis['suggested_mappings']['ActivityEmissionSourceID'] = 'ActivityEmissionSourceID'
         
 
         # fact table generation

@@ -91,16 +91,19 @@ def find_matching_source_column(dest_col: str,
     
     # Define similarity metrics
     def calculate_similarity(source_col):
-        name_similarity = fuzz.ratio(dest_col.lower(), source_col.lower())
-        type_compatibility = is_type_compatible(
-            column_types[source_col],
-            dest_col
-        )
+        name_similarity = fuzz.ratio(dest_col.lower(), source_col.lower()) / 100.0
+        type_compatibility = 0.0
+        if source_col in column_types:
+            type_compatibility = is_type_compatible(
+                column_types[source_col],
+                dest_col
+            )
+        
         return (name_similarity + type_compatibility) / 2
     
     # Find best match
     matches = [(col, calculate_similarity(col)) for col in source_cols]
-    best_match = max(matches, key=lambda x: x[1])
+    best_match = max(matches, key=lambda x: x[1] if matches else (None, 0))
     
     return best_match[0] if best_match[1] > 0.5 else None
 
@@ -176,52 +179,40 @@ def relate_country_company(country: str, company: str, company_df: pd.DataFrame,
 
     return company_df
 
-def transform_D_Currency(mapping: pd.DataFrame, source_df: pd.DataFrame, dest_df: pd.DataFrame) -> pd.DataFrame:
-    """Transform currency dimension with fallback to default currency"""
-    
-    # Check if currency mapping exists and has valid source column
-    has_currency_mapping = (
-        isinstance(mapping, dict) and 
-        'CurrencyID' in mapping and 
-        isinstance(mapping['CurrencyID'], dict) and
-        'source_column' in mapping['CurrencyID'] and
-        mapping['CurrencyID']['source_column'] is not None and 
-        mapping['CurrencyID']['source_column'] in source_df.columns
-    )
+def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transform currency dimension so that only currencies present in the raw data
+    (e.g., from 'unit_price_currency' column) are included in the output,
+    with all details (CurrencyID, CurrencyCode, Symbol, CurrencyName) from the destination table.
+    """
+    # Try to find the relevant source column for currency
+    currency_col = None
+    if isinstance(mapping, dict) and 'CurrencyID' in mapping and isinstance(mapping['CurrencyID'], dict):
+        currency_col = mapping['CurrencyID'].get('source_column')
+    # Fallback: try to auto-detect common currency column names
+    if not currency_col or currency_col not in source_df.columns:
+        for col in source_df.columns:
+            if col.lower() in ['unit_price_currency', 'currency', 'currency_code']:
+                currency_col = col
+                break
 
     # Create empty dataframe with destination structure
     df = create_empty_dimension_structure(dest_df)
 
-    if has_currency_mapping:
-        # Get unique currencies from source_df
-        unique_currencies = source_df[mapping['CurrencyID']['source_column']].dropna().unique()
-        
-        # Add currencies from user data
-        for idx, currency in enumerate(unique_currencies):
-            new_record = pd.DataFrame({
-                'CurrencyID': [idx + 1],
-                'CurrencyCode': [currency],
-                'CurrencyName': [currency],
-                'Symbol': [None],  # Nullable field
-                'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
-                'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
-            })
-            # Ensure CurrencyID is int type
-            new_record['CurrencyID'] = new_record['CurrencyID'].astype('int')
-            df = pd.concat([df, new_record], ignore_index=True)
+    if currency_col and currency_col in source_df.columns:
+        # Get unique currency codes from the raw data
+        unique_currencies = source_df[currency_col].dropna().astype(str).str.upper().unique()
+        # Filter the destination table for only those currencies
+        filtered = dest_df[dest_df['CurrencyCode'].astype(str).str.upper().isin(unique_currencies)].copy()
+        # Reset index and preserve dtypes
+        filtered = filtered.reset_index(drop=True)
+        df = pd.concat([df, filtered], ignore_index=True)
     else:
-        # Add default currency if no mapping exists
-        default_currency = pd.DataFrame({
-            'CurrencyID': [1],
-            'CurrencyCode': ['USD'],
-            'CurrencyName': ['US Dollar'],
-            'Symbol': ['$'],
-            'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
-            'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
-        })
-        df = pd.concat([df, default_currency], ignore_index=True)
+        # If no mapping or no matching column, return empty or default (optional)
+        pass
 
     return df
+
 
 def transform_emission_source_provider(mapping: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame) -> pd.DataFrame:
     """Transform emission source provider data"""
