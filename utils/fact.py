@@ -19,6 +19,20 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     activity_sub_cat_id = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
     iso2_code = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
     
+    # Special handling for Electricity (ActivitySubcategoryID 21)
+    if activity_sub_cat_id == 21:
+        # Try to find Green Electricity first
+        green_electricity = activity_emission_source_df[
+            (activity_emission_source_df['ActivitySubcategoryID'] == activity_sub_cat_id) &
+            (activity_emission_source_df['ActivityEmissionSourceName'] == 'Green Electricity')
+        ]
+        
+        if not green_electricity.empty:
+            emission_source_id = green_electricity.iloc[0]['ActivityEmissionSourceID']
+            unit_id = green_electricity.iloc[0]['UnitID']
+            emission_factor_id = f"{iso2_code}_Green_Electricity"
+            return emission_source_id, unit_id, emission_factor_id
+    
     # Define transformation suffixes based on calc_method
     valid_transformations = ['Distance', 'Fuel', 'Electricity', 'Heating', 'Days'] if calc_method == 'Consumption-based' else ['Currency']
     
@@ -49,7 +63,7 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     # Get unit ID and emission factor ID
     unit_id = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'UnitID')
     emission_source_name = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'ActivityEmissionSourceName')
-    emission_factor_id = f"{iso2_code}_{emission_source_name}"
+    emission_factor_id = f"{iso2_code}_{emission_source_name.replace(' ', '_')}"
     
     return emission_source_id, unit_id, emission_factor_id
 
@@ -58,7 +72,7 @@ def get_emission_source_id_by_suffix(df, subcategory_id, suffix):
     """Get emission source ID for sources ending with suffix (case-insensitive) and matching subcategory ID."""
     filtered = df[
         (df['ActivitySubcategoryID'] == subcategory_id) &
-        (df['ActivityEmissionSourceName'].str.lower().str.endswith(suffix.lower()))
+        (df['ActivityEmissionSourceName'].str.lower().str.contains(suffix.lower()))
     ]
     return filtered.iloc[0]['ActivityEmissionSourceID'] if not filtered.empty else None
 
@@ -141,7 +155,8 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
                   activity_emmission_source_provider_df: pd.DataFrame, unit_df: pd.DataFrame,
                   currency_df: pd.DataFrame, date_df: pd.DataFrame, country_df: pd.DataFrame,
                   company_df: pd.DataFrame, company: str, country: str, activity_cat: str, 
-                  activity_subcat: str, reporting_year: int, calc_method: str) -> pd.DataFrame:    
+                  activity_subcat: str, reporting_year: int, calc_method: str, 
+                  org_unit_df: pd.DataFrame = None, dest_tables: dict = None) -> pd.DataFrame:    
 
     # Record start time
     start_time = datetime.now()
@@ -275,9 +290,80 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
         scope_id = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ScopeID')
         new_row['ScopeID'] = int(scope_id) if scope_id is not None else None
         
-        new_row['ActivityEmissionSourceID'] = int(emission_source_id) if emission_source_id is not None else None
+        # Handle ActivityEmissionSourceID
+        if emission_source_id is not None:
+            new_row['ActivityEmissionSourceID'] = int(emission_source_id)
+        else:
+            # Try to find ActivityEmissionSourceID from source data if available
+            source_col = None
+            if isinstance(mappings, dict) and 'ActivityEmissionSourceID' in mappings and isinstance(mappings['ActivityEmissionSourceID'], dict):
+                source_col = mappings['ActivityEmissionSourceID'].get('source_column')
+            
+            if source_col and source_col in source_df.columns and not pd.isna(source_row[source_col]):
+                new_row['ActivityEmissionSourceID'] = int(source_row[source_col])
+            else:
+                # Check for Green Electricity source for ActivitySubcategoryID 21
+                activity_subcategory_id = new_row.get('ActivitySubcategoryID')
+                if activity_subcategory_id == 21:
+                    # Filter for Green Electricity sources
+                    green_electricity_sources = activity_emission_source_df[
+                        (activity_emission_source_df['ActivitySubcategoryID'] == 21) &
+                        (activity_emission_source_df['ActivityEmissionSourceName'] == 'Green Electricity')
+                    ]
+                    if not green_electricity_sources.empty:
+                        new_row['ActivityEmissionSourceID'] = int(green_electricity_sources.iloc[0]['ActivityEmissionSourceID'])
+                    else:
+                        # Default to first emission source ID if available
+                        if not activity_emission_source_df.empty:
+                            new_row['ActivityEmissionSourceID'] = int(activity_emission_source_df['ActivityEmissionSourceID'].iloc[0])
+                        else:
+                            new_row['ActivityEmissionSourceID'] = None
+                else:
+                    # Default to first emission source ID if available
+                    if not activity_emission_source_df.empty:
+                        new_row['ActivityEmissionSourceID'] = int(activity_emission_source_df['ActivityEmissionSourceID'].iloc[0])
+                    else:
+                        new_row['ActivityEmissionSourceID'] = None
+        
+        # Map UnitID based on the unit name in the raw data
+        unit_id = None
+        unit_col = None
+        # Try to find the unit column in mapping or auto-detect
+        if isinstance(mappings, dict) and 'UnitID' in mappings and isinstance(mappings['UnitID'], dict):
+            unit_col = mappings['UnitID'].get('source_column')
+        if not unit_col or unit_col not in source_df.columns:
+            for col in source_df.columns:
+                if col.lower() in ['consumption_unit', 'unit', 'unitname']:
+                    unit_col = col
+                    break
+        if unit_col and unit_col in source_df.columns:
+            unit_name = source_row[unit_col]
+            # Lookup UnitID from unit_df
+            unit_id_lookup = unit_df[unit_df['UnitName'].astype(str) == str(unit_name)]
+            if not unit_id_lookup.empty:
+                unit_id = int(unit_id_lookup['UnitID'].iloc[0])
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
-        new_row['EmissionFactorID'] = emission_factor_id
+        
+        # Handle EmissionFactorID
+        if emission_factor_id is not None:
+            new_row['EmissionFactorID'] = emission_factor_id
+        else:
+            # Generate EmissionFactorID based on country ISO2Code and ActivityEmissionSourceName
+            country_iso2 = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
+            
+            # Get ActivityEmissionSourceName if we have ActivityEmissionSourceID
+            emission_source_name = None
+            if new_row['ActivityEmissionSourceID'] is not None:
+                emission_source_name_lookup = activity_emission_source_df[
+                    activity_emission_source_df['ActivityEmissionSourceID'] == new_row['ActivityEmissionSourceID']
+                ]
+                if not emission_source_name_lookup.empty:
+                    emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
+            
+            if country_iso2 and emission_source_name:
+                new_row['EmissionFactorID'] = f"{country_iso2}_{emission_source_name}"
+            else:
+                new_row['EmissionFactorID'] = None
 
         date_key = get_date_key(date_df, mappings.get('DateKey', {}).get('source_column'), reporting_year, source_row.get(mappings.get('DateKey', {}).get('source_column')))
         new_row['DateKey'] = int(date_key) if date_key is not None else None
@@ -336,23 +422,185 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
                     value = source_row[source_column]
                     new_row[field_name] = float(value) if value is not None else None
                 else:
-                    new_row[field_name] = None
+                    # Default value if no mapping exists
+                    new_row[field_name] = 1.0  # Default consumption amount
+                    logging.info(f"Using default ConsumptionAmount: 1.0")
                     
-            elif field_name == 'PaidAmount' and source_column in source_df.columns:
-                value = source_row[source_column]
-                new_row[field_name] = float(value) if value is not None else None
+            elif field_name == 'PaidAmount':
+                if source_column and source_column in source_df.columns:
+                    value = source_row[source_column]
+                    new_row[field_name] = float(value) if value is not None else None
+                else:
+                    # Default value if no mapping exists
+                    new_row[field_name] = 0.0  # Default paid amount
+                    logging.info(f"Using default PaidAmount: 0.0")
             
             # Handle provider and currency if present in mappings
-            if field_name == 'ActivityEmissionSourceProviderID' and source_column in source_df.columns:
-                provider_name = source_row[source_column]
-                provider_id = lookup_value(activity_emmission_source_provider_df, 
-                                         'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
-                new_row[field_name] = int(provider_id) if provider_id is not None else None
+            if field_name == 'ActivityEmissionSourceProviderID':
+                if source_column and source_column in source_df.columns:
+                    provider_name = source_row[source_column]
+                    # First try to find in the activity_emmission_source_provider_df
+                    provider_id = lookup_value(activity_emmission_source_provider_df, 
+                                             'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
+                    
+                    if provider_id is not None:
+                        new_row[field_name] = int(provider_id)
+                    else:
+                        # If not found in the activity_emmission_source_provider_df, check if it exists in the destination tables
+                        if dest_tables and 'DE1_ActivityEmissionSourceProvi' in dest_tables:
+                            provider_df = dest_tables['DE1_ActivityEmissionSourceProvi']
+                            provider_row = provider_df[provider_df['ProviderName'].str.lower() == provider_name.lower() if provider_name else False]
+                            if not provider_row.empty:
+                                new_row[field_name] = int(provider_row['ActivityEmissionSourceProviderID'].iloc[0])
+                            else:
+                                # If not found in destination tables, create a new provider entry
+                                if not provider_df.empty:
+                                    new_provider_id = provider_df['ActivityEmissionSourceProviderID'].max() + 1
+                                else:
+                                    new_provider_id = 1
+                                
+                                # Add to activity_emmission_source_provider_df for future lookups
+                                new_provider = pd.DataFrame({
+                                    'ActivityEmissionSourceProviderID': [new_provider_id],
+                                    'ProviderName': [provider_name]
+                                })
+                                activity_emmission_source_provider_df = pd.concat([activity_emmission_source_provider_df, new_provider], ignore_index=True)
+                                
+                                new_row[field_name] = int(new_provider_id)
+                        else:
+                            new_row[field_name] = None  # No destination tables provided
+                else:
+                    # If no mapping exists, try to find a default provider
+                    if not activity_emmission_source_provider_df.empty:
+                        new_row[field_name] = int(activity_emmission_source_provider_df['ActivityEmissionSourceProviderID'].iloc[0])
+                    elif dest_tables and 'DE1_ActivityEmissionSourceProvi' in dest_tables and not dest_tables['DE1_ActivityEmissionSourceProvi'].empty:
+                        # Use the first provider from destination tables
+                        new_row[field_name] = int(dest_tables['DE1_ActivityEmissionSourceProvi']['ActivityEmissionSourceProviderID'].iloc[0])
+                    else:
+                        new_row[field_name] = None  # No providers available
             
-            if field_name == 'CurrencyID' and source_column in source_df.columns:
-                currency_code = source_row[source_column]
-                currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
-                new_row[field_name] = int(currency_id) if currency_id is not None else None
+            # Handle OrganizationalUnitID (note: there might be a space in the column name)
+            if field_name == 'OrganizationalUnitID' or field_name == 'OrganizationalUnitID ':
+                # Use the correct field name with space for the new_row
+                actual_field_name = 'OrganizationalUnitID ' if 'OrganizationalUnitID ' in dest_df.columns else 'OrganizationalUnitID'
+                
+                if source_column and source_column in source_df.columns:
+                    org_unit_name = source_row[source_column]
+                    # Try to find the organizational unit in the provided org_unit_df
+                    if org_unit_df is not None and not org_unit_df.empty:
+                        org_unit_id = lookup_value(org_unit_df, 'OrganizationalUnitName', org_unit_name, 'OrganizationalUnitID')
+                        new_row[actual_field_name] = int(org_unit_id) if org_unit_id is not None else None  # Use None if not found
+                    else:
+                        # If org_unit_df is empty, try to find the organizational unit in the destination tables
+                        if dest_tables and 'D_OrganizationalUnit' in dest_tables:
+                            org_unit_df_dest = dest_tables['D_OrganizationalUnit']
+                            # Try to find by company name if available
+                            if company and not org_unit_df_dest.empty:
+                                # First try to find by exact org unit name
+                                org_unit_row = org_unit_df_dest[org_unit_df_dest['OrganizationalUnitName'].str.lower() == org_unit_name.lower() if org_unit_name else False]
+                                if not org_unit_row.empty:
+                                    new_row[actual_field_name] = int(org_unit_row['OrganizationalUnitID'].iloc[0])
+                                else:
+                                    # Try to find by company name
+                                    company_id = None
+                                    if 'D_Company' in dest_tables:
+                                        company_df = dest_tables['D_Company']
+                                        company_row = company_df[company_df['CompanyName'].str.lower() == company.lower()]
+                                        if not company_row.empty:
+                                            company_id = int(company_row['CompanyID'].iloc[0])
+                                    
+                                    if company_id is not None:
+                                        # Find organizational units for this company
+                                        company_org_units = org_unit_df_dest[org_unit_df_dest['CompanyID'] == company_id]
+                                        if not company_org_units.empty:
+                                            # Use the first organizational unit for this company
+                                            new_row[actual_field_name] = int(company_org_units['OrganizationalUnitID'].iloc[0])
+                                        else:
+                                            new_row[actual_field_name] = None  # No org units found for this company
+                                    else:
+                                        new_row[actual_field_name] = None  # Company not found
+                            else:
+                                new_row[actual_field_name] = None  # No company name provided
+                        else:
+                            new_row[actual_field_name] = None  # No destination tables provided
+                else:
+                    # If no mapping exists, try to find the organizational unit by company name
+                    if dest_tables and 'D_OrganizationalUnit' in dest_tables and company:
+                        org_unit_df_dest = dest_tables['D_OrganizationalUnit']
+                        company_id = None
+                        if 'D_Company' in dest_tables:
+                            company_df = dest_tables['D_Company']
+                            company_row = company_df[company_df['CompanyName'].str.lower() == company.lower()]
+                            if not company_row.empty:
+                                company_id = int(company_row['CompanyID'].iloc[0])
+                        
+                        if company_id is not None and not org_unit_df_dest.empty:
+                            # Find organizational units for this company
+                            company_org_units = org_unit_df_dest[org_unit_df_dest['CompanyID'] == company_id]
+                            if not company_org_units.empty:
+                                # Use the first organizational unit for this company
+                                new_row[actual_field_name] = int(company_org_units['OrganizationalUnitID'].iloc[0])
+                            else:
+                                new_row[actual_field_name] = None  # No org units found for this company
+                        else:
+                            new_row[actual_field_name] = None  # Company not found
+                    else:
+                        new_row[actual_field_name] = None  # No destination tables or company provided
+                    
+            # Handle EmissionFactorID
+            if field_name == 'EmissionFactorID':
+                # Check if we have a direct mapping for EmissionFactorID
+                if source_column and source_column in source_df.columns:
+                    emission_factor_id = source_row[source_column]
+                    new_row[field_name] = emission_factor_id
+                else:
+                    # Generate EmissionFactorID based on country ISO2Code and ActivityEmissionSourceName
+                    # Get the country ISO2Code
+                    country_id = new_row.get('CountryID')
+                    if country_id and not pd.isna(country_id) and not country_df.empty:
+                        country_iso2code = lookup_value(country_df, 'CountryID', country_id, 'ISO2Code')
+                        
+                        # Get the ActivityEmissionSourceName
+                        activity_emission_source_id = new_row.get('ActivityEmissionSourceID')
+                        if activity_emission_source_id and not pd.isna(activity_emission_source_id) and not activity_emission_source_df.empty:
+                            activity_subcategory_id = new_row.get('ActivitySubcategoryID')
+                            
+                            # Filter for Green Electricity (ActivitySubcategoryID = 21)
+                            if activity_subcategory_id == 21:
+                                # Find the emission source with the given ID
+                                emission_source_row = activity_emission_source_df[
+                                    (activity_emission_source_df['ActivityEmissionSourceID'] == activity_emission_source_id) &
+                                    (activity_emission_source_df['ActivitySubcategoryID'] == activity_subcategory_id)
+                                ]
+                                
+                                if not emission_source_row.empty:
+                                    activity_emission_source_name = emission_source_row.iloc[0]['ActivityEmissionSourceName']
+                                    
+                                    # Concatenate ISO2Code and ActivityEmissionSourceName
+                                    if country_iso2code and activity_emission_source_name:
+                                        emission_factor_id = f"{country_iso2code}_{activity_emission_source_name.replace(' ', '_')}"
+                                        new_row[field_name] = emission_factor_id
+                                    else:
+                                        # Default if we can't generate a proper ID
+                                        new_row[field_name] = "Unknown_EmissionFactor"
+                                else:
+                                    new_row[field_name] = "Unknown_EmissionFactor"
+                            else:
+                                new_row[field_name] = "Unknown_EmissionFactor"
+                        else:
+                            new_row[field_name] = "Unknown_EmissionFactor"
+                    else:
+                        new_row[field_name] = "Unknown_EmissionFactor"
+            
+            if field_name == 'CurrencyID':
+                if source_column and source_column in source_df.columns:
+                    currency_code = source_row[source_column]
+                    currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                    new_row[field_name] = int(currency_id) if currency_id is not None else None
+                else:
+                    # If no mapping exists, try to find a default currency
+                    if not currency_df.empty:
+                        new_row[field_name] = int(currency_df['CurrencyID'].iloc[0])
         
         # Update progress
         progress = (index + 1) / total_records

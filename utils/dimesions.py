@@ -144,21 +144,21 @@ def transform_D_Date(mapping, source_df, ReportingYear) -> pd.DataFrame:
         })
    
     else:
-        # Create date for reporting year
-        year_start = pd.Timestamp(f'{ReportingYear}-01-01')
-        year_end = pd.Timestamp(f'{ReportingYear}-12-31')
+        # Create dates for all days in the reporting year
+        dates = pd.date_range(start=f'{ReportingYear}-01-01', end=f'{ReportingYear}-12-31', freq='D')
         
+        # Create a DataFrame with all dates in the reporting year
         date_df = pd.DataFrame({
-            'DateKey': [int(f"{ReportingYear}0101")],
-            'StartDate': [year_start.date()],
-            'EndDate': [year_end.date()],
-            'Description': [f"{ReportingYear} Annual Report"],
-            'Year': [int(ReportingYear)],
-            'Quarter': [1],
-            'Month': [1],
-            'Day': [1],
-            'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
-            'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
+            'DateKey': dates.strftime('%Y%m%d').astype('int'),
+            'StartDate': dates.date,
+            'EndDate': dates.date,
+            'Description': dates.strftime('%Y-%m-%d'),
+            'Year': dates.year,
+            'Quarter': dates.quarter,
+            'Month': dates.month,
+            'Day': dates.day,
+            'created_at': format_timestamp_as_varchar(pd.Timestamp.now()),
+            'updated_at': format_timestamp_as_varchar(pd.Timestamp.now())
         })
 
     # Ensure DateKey is unique
@@ -246,36 +246,36 @@ def transform_emission_source_provider(mapping: dict, source_df: pd.DataFrame, d
     
     return result_df
 
-def transform_unit(mapping: pd.DataFrame, source_df: pd.DataFrame, dest_df: pd.DataFrame, calc_method) -> pd.DataFrame:
-    if mapping['UnitID']['source_column'] is not None and mapping['UnitID']['source_column'] in source_df.columns and calc_method=='Consumption-based':
-        # get unique units from source_df and handle null values
-        unique_units = source_df[mapping['UnitID']['source_column']].dropna().unique()
-        
-        # BUG FIX 1: Create empty dataframe instead of copying destination data with mock data
-        df = create_empty_dimension_structure(dest_df)
-        
-        # Add only the new units from user data
-        for idx, unit in enumerate(unique_units):
-            # Convert to string and skip empty values
-            if isinstance(unit, (list, tuple)):
-                unit = str(unit[0])  # Take first element if it's a sequence
-            elif unit is not None:
-                unit = str(unit)  # Convert to string if it's not None
-            else:
-                unit = ""  # Default to empty string if None
-                
-            new_record = pd.DataFrame({
-                'UnitID': [idx + 1],  # Start with ID 1 for new table
-                'UnitName': [unit],
-                'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
-                'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
-            })
-            # Ensure UnitID is int type
-            new_record['UnitID'] = new_record['UnitID'].astype('int')
-            df = pd.concat([df, new_record], ignore_index=True)
-    else :
-        # If calc_method is not 'Consumption-based', return empty DataFrame
-        df = create_empty_dimension_structure(dest_df)
+def transform_unit(mapping, source_df: pd.DataFrame, dest_df: pd.DataFrame, calc_method) -> pd.DataFrame:
+    """
+    Transform unit dimension so that only units present in the raw data
+    (e.g., from 'consumption_unit' column) are included in the output,
+    with all details (UnitID, UnitName, UnitType, etc.) from the destination table.
+    """
+    # Try to find the relevant source column for unit
+    unit_col = None
+    if isinstance(mapping, dict) and 'UnitID' in mapping and isinstance(mapping['UnitID'], dict):
+        unit_col = mapping['UnitID'].get('source_column')
+    # Fallback: try to auto-detect common unit column names
+    if not unit_col or unit_col not in source_df.columns:
+        for col in source_df.columns:
+            if col.lower() in ['consumption_unit', 'unit', 'unitname']:
+                unit_col = col
+                break
+
+    # Create empty dataframe with destination structure
+    df = create_empty_dimension_structure(dest_df)
+
+    if unit_col and unit_col in source_df.columns:
+        # Get unique unit names from the raw data
+        unique_units = source_df[unit_col].dropna().astype(str).unique()
+        # Filter the destination table for only those units
+        filtered = dest_df[dest_df['UnitName'].astype(str).isin(unique_units)].copy()
+        filtered = filtered.reset_index(drop=True)
+        df = pd.concat([df, filtered], ignore_index=True)
+    else:
+        # If no mapping or no matching column, return empty or default (optional)
+        pass
 
     return df
 

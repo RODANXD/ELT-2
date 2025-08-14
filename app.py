@@ -126,17 +126,35 @@ if dest_ready:
 else:
     st.warning("Cannot upload source file until destination schema and reference data load successfully.")
 
-company_mode = st.radio("Does the company already exist?", 
-                        ["A single company / unit", "Multiple companies or organizational units"], key="company_mode")
-
+company_mode = st.radio(
+    "Does the company already exist?",
+    ["A single company / unit", "Multiple companies or organizational units"],
+    key="company_mode"
+)
 
 if company_mode == "A single company / unit":
-    company_name = st.text_input("Company Name (as it should appear in the report)")
-    org_unit_name = st.text_input("Organizational Unit Name (optional)","")
+    unit_mode = st.radio(
+        "Is this data for a single unit or multiple units?",
+        ["Single unit", "Multiple units"],
+        key="unit_mode"
+    )
+    if unit_mode == "Single unit":
+        org_unit_name = st.text_input("Organizational Unit Name")
+    else:
+        multi_unit_upload = st.radio(
+            "How are you uploading data?",
+            ["Uploading each unit separately", "All units in one file"],
+            key="multi_unit_upload"
+        )
+        if multi_unit_upload == "Uploading each unit separately":
+            org_unit_name = st.text_input("Organizational Unit Name for this upload")
+        else:
+            st.info("Your file must contain an 'organizational_unit' column for AI detection.")
+            org_unit_name = None
 else:
-    company_name = None
     org_unit_name = None
     st.info("The AI will auto-detect companies & org-units from the file.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout: Main area with 1 column (content)
@@ -185,7 +203,7 @@ with left_col:
                         dest_schema,
                         dest_tables,
                         reporting_year,
-                        org_unit_name
+                        org_unit_name,
                     )
                     
                     logger.info("Data transformation complete.")
