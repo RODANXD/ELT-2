@@ -289,21 +289,37 @@ def transform_organizational_unit(org_unit_name: str, company_df: pd.DataFrame, 
         # Get company ID for the relationship
         company_id = company_df['CompanyID'].iloc[0] if not company_df.empty else None
         
-        # Create new record
-        new_record = pd.DataFrame({
-            'OrganizationalUnitID': [1],  # Start with ID 1 for new table
-            'OrganizationalUnitName': [org_unit_name],
-            'CompanyID': [company_id],
-            'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
-            'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
-        })
+        # Check if the organizational unit already exists in the destination table
+        existing_org_unit = dest_df[dest_df['OrganizationalUnitName'].str.lower() == org_unit_name.lower()]
         
-        # Ensure ID columns are int type
-        new_record['OrganizationalUnitID'] = new_record['OrganizationalUnitID'].astype('int')
-        if company_id is not None:
-            new_record['CompanyID'] = new_record['CompanyID'].astype('int')
-        
-        df = pd.concat([df, new_record], ignore_index=True)
+        if not existing_org_unit.empty:
+            # If the organizational unit exists, use the existing record
+            org_unit_id = existing_org_unit['OrganizationalUnitID'].iloc[0]
+            org_unit_record = existing_org_unit.copy()
+            df = pd.concat([df, org_unit_record], ignore_index=True)
+        else:
+            # If the organizational unit doesn't exist, create a new record
+            # Get the next available ID
+            org_unit_id = dest_df['OrganizationalUnitID'].max() + 1 if not dest_df.empty else 1
+            
+            # Create new record
+            new_record = pd.DataFrame({
+                'OrganizationalUnitID': [org_unit_id],
+                'OrganizationalUnitName': [org_unit_name],
+                'CompanyID': [company_id],
+                'created_at': [format_timestamp_as_varchar(pd.Timestamp.now())],
+                'updated_at': [format_timestamp_as_varchar(pd.Timestamp.now())]
+            })
+            
+            # Ensure ID columns are int type
+            new_record['OrganizationalUnitID'] = new_record['OrganizationalUnitID'].astype('int')
+            if company_id is not None:
+                new_record['CompanyID'] = new_record['CompanyID'].astype('int')
+            
+            df = pd.concat([df, new_record], ignore_index=True)
+            
+            # Also append the new record to the destination table for future reference
+            dest_df = pd.concat([dest_df, new_record], ignore_index=True)
     
     return df
 

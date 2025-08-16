@@ -59,15 +59,94 @@ def ensure_company_and_country(dest_tables, company_name, country_name):
 
     return dest_tables, company_id, country_id
 
+
+
+def ensure_organizational_unit(dest_tables, org_unit_name, company_id):
+    """
+    Ensure organizational unit exists in destination tables.
+    If not, append it and return updated tables and ID.
+    """
+    d_org_unit = dest_tables['D_OrganizationalUnit']
+
+    if org_unit_name:
+        # Check if org unit exists
+        org_unit_row = d_org_unit[d_org_unit['OrganizationalUnitName'].str.lower() == org_unit_name.lower()]
+        if not org_unit_row.empty:
+            # Use existing org unit
+            org_unit_id = int(org_unit_row['OrganizationalUnitID'].iloc[0])
+        else:
+            # Create new org unit
+            org_unit_id = d_org_unit['OrganizationalUnitID'].max() + 1 if not d_org_unit.empty else 1
+            new_org_unit = {
+                'OrganizationalUnitID': org_unit_id,
+                'OrganizationalUnitName': org_unit_name,
+                'CompanyID': company_id,
+                'created_at': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                'updated_at': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            }
+            d_org_unit = pd.concat([d_org_unit, pd.DataFrame([new_org_unit])], ignore_index=True)
+            
+            # Update dest_tables with new org unit
+            dest_tables['D_OrganizationalUnit'] = d_org_unit
+            
+            # Save updated D_OrganizationalUnit back to DestinationTables.xlsx
+            output_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'DestinationTables.xlsx')
+            with pd.ExcelWriter(output_path, mode='a', if_sheet_exists='replace') as writer:
+                d_org_unit.to_excel(writer, sheet_name='D_OrganizationalUnit', index=False)
+
+        return dest_tables, org_unit_id
+    else:
+        return dest_tables, None
+
 def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
                       company: str, country: str, calc_method: str,
                       activity_cat: str, activity_subcat: str,
                       dest_schema: dict, dest_tables: dict,
-                      ReportingYear: int, org_unit_name: str = None):
-    # Ensure company and country exist, update tables and get IDs
-    
-    dest_tables, company_id, country_id = ensure_company_and_country(dest_tables, company, country)
+                      ReportingYear: int, org_unit_name: str = None,
+                      company_mode: str = "A single company / unit",
+                      unit_mode: str = "Single unit"):
 
+    
+    # Ensure company and country first
+    dest_tables, company_id, country_id = ensure_company_and_country(dest_tables, company, country)
+    
+    # Handle organizational unit(s) depending on mode
+    d_company_df, d_org_unit_df = handle_company_and_units(
+        dest_tables,
+        company_mode,
+        company,
+        org_unit_name,
+        source_df,
+        country_id,
+        unit_mode
+    )
+    
+    # Update dest_tables with new values
+    dest_tables['D_Company'] = d_company_df
+    dest_tables['D_OrganizationalUnit'] = d_org_unit_df
+    
+    # Handle organizational unit based on user selection
+    is_multiple_units = (
+    company_mode == "Multiple companies or organizational units"
+)
+
+    unit_column = None
+    
+    # Determine the column containing organizational unit names for multiple units scenario
+    if is_multiple_units:
+        # Try to find the organizational unit column in the source data
+        potential_unit_columns = ['organizational_unit', 'org_unit', 'unit_name', 'supplier_name', 'provider']
+        for col in potential_unit_columns:
+            if col in source_df.columns:
+                unit_column = col
+                break
+    
+    # Use transform_organizational_unit for fact generation (keeps schema consistent)
+    org_unit_df = d_org_unit_df.copy()  # Use the actual organizational unit dataframe instead of creating a new one
+    logger.info(f"Using organizational unit dataframe with {len(org_unit_df)} entries for fact generation")
+    
+    
+    
     
     schema_analysis = analyze_source_schema(source_df)
     logger.info(f"Source schema analysis: {schema_analysis}")
@@ -145,7 +224,7 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
 
     # fact table generation - use empty fact table structure
     empty_fact_df = create_empty_fact_table_structure(dest_tables['FE1_EmissionActivityData'])
-    
+    # Generate fact table    
     # Ensure mapping contains necessary fields for fact table columns
     required_fields = ['ConsumptionAmount', 'CurrencyID', 'PaidAmount', 'ActivityEmissionSourceProviderID']
     for field in required_fields:
@@ -161,12 +240,24 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
     # Log the mapping for debugging
     print(f"Mapping for fact table: {mapping}")
     
-    emmission_activity_data_df = generate_fact(mapping, source_df, empty_fact_df,
-                                              activity_cat_df, activity_subcat_df, scope_df,
-                                              activity_emmission_source_df, activity_emmission_source_provider_df,
-                                              unit_df, currency_df, date_df, country_df, company_df,
-                                              company, country, activity_cat, activity_subcat,
-                                              ReportingYear, calc_method, org_unit_df, dest_tables)
+    # Ensure org_unit_df has the correct column names
+    # Normalize column names for organizational unit
+    if 'OrganizationalUnitID ' in org_unit_df.columns:
+        org_unit_df = org_unit_df.rename(columns={'OrganizationalUnitID ': 'OrganizationalUnitID'})
+    if 'OrganizationalUnitID ' in empty_fact_df.columns:
+        empty_fact_df = empty_fact_df.rename(columns={'OrganizationalUnitID ': 'OrganizationalUnitID'})
+
+    
+    emmission_activity_data_df = generate_fact(
+    mapping, source_df, empty_fact_df,
+    activity_cat_df, activity_subcat_df, scope_df,
+    activity_emmission_source_df, activity_emmission_source_provider_df,
+    unit_df, currency_df, date_df, country_df, company_df,
+    company, country, activity_cat, activity_subcat,
+    ReportingYear, calc_method, org_unit_df, dest_tables,
+    is_multiple_units=is_multiple_units,
+    unit_column=unit_column
+)
 
 
 
@@ -205,11 +296,16 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
 
     print(f"Transformed data written to {os.path.join(output_dir, 'transformed_data.xlsx')}")
 
-    # Save updated D_Company and D_Country back to DestinationTables.xlsx
+    # Save updated D_Company, D_Country, D_OrganizationalUnit, and DE1_ActivityEmissionSourceProvi back to DestinationTables.xlsx
     output_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'DestinationTables.xlsx')
     with pd.ExcelWriter(output_path, mode='a', if_sheet_exists='replace') as writer:
         dest_tables['D_Company'].to_excel(writer, sheet_name='D_Company', index=False)
         dest_tables['D_Country'].to_excel(writer, sheet_name='D_Country', index=False)
+        dest_tables['D_OrganizationalUnit'].to_excel(writer, sheet_name='D_OrganizationalUnit', index=False)
+        
+        # Also save the provider data back to DestinationTables.xlsx
+        if 'DE1_ActivityEmissionSourceProvi' in dest_tables:
+            dest_tables['DE1_ActivityEmissionSourceProvi'].to_excel(writer, sheet_name='DE1_ActivityEmissionSourceProvi', index=False)
 
     return {
         "D_Company": company_df,
@@ -228,14 +324,39 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
 
 
 
-def handle_company_and_units(dest_tables, company_mode, company_name, org_unit_name, source_df, country_id):
+def handle_company_and_units(dest_tables, company_mode, company_name, org_unit_name, source_df, country_id, unit_mode="Single unit"):
+    """Handle company and organizational unit creation based on user selection.
+    
+    Args:
+        dest_tables: Dictionary of destination tables
+        company_mode: "A single company / unit" or "Multiple companies or organizational units"
+        company_name: Name of the company (for single company mode)
+        org_unit_name: Name of the organizational unit (for single unit mode)
+        source_df: Source dataframe
+        country_id: Country ID for the company
+        unit_mode: "Single unit" or "Multiple units" (for single company mode)
+    """
     d_company_df = dest_tables['D_Company']
     d_org_unit_df = dest_tables['D_OrganizationalUnit']
+    logger.info(f"Handling companies and units: mode={company_mode}, unit_mode={unit_mode}")
+
+    # Potential columns that might contain organizational unit information
+    potential_unit_columns = ['organizational_unit', 'org_unit', 'unit_name', 'supplier_name', 'provider', 'department', 'division']
+    unit_column = None
+    
+    # Find the first column that exists in the source data
+    for col in potential_unit_columns:
+        if col in source_df.columns:
+            unit_column = col
+            logger.info(f"Found organizational unit column: {unit_column}")
+            break
 
     if company_mode == "A single company / unit":
+        # Handle single company
         existing_company = d_company_df[d_company_df['CompanyName'].str.lower() == company_name.lower()]
         if not existing_company.empty:
             company_id = existing_company['CompanyID'].iloc[0]
+            logger.info(f"Using existing company: {company_name} (ID: {company_id})")
         else:
             company_id = d_company_df['CompanyID'].max() + 1 if not d_company_df.empty else 1
             new_company = pd.DataFrame({
@@ -245,47 +366,181 @@ def handle_company_and_units(dest_tables, company_mode, company_name, org_unit_n
                 'Industry': [None]
             })
             d_company_df = pd.concat([d_company_df, new_company], ignore_index=True)
+            logger.info(f"Created new company: {company_name} (ID: {company_id})")
 
-        if org_unit_name:  # single or per-file unit
-            unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
-            new_unit = pd.DataFrame({
-                'OrganizationalUnitID': [unit_id],
-                'OrganizationalUnitName': [org_unit_name],
-                'CompanyID': [company_id]
-            })
-            d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
-        else:  # detect units from source data
-            if 'organizational_unit' in source_df.columns:
-                for unit in source_df['organizational_unit'].dropna().unique():
+        if unit_mode == "Single unit":
+            # Single organizational unit
+            if org_unit_name:
+                # Check if the unit already exists
+                existing_unit = d_org_unit_df[d_org_unit_df['OrganizationalUnitName'].str.lower() == org_unit_name.lower()]
+                if not existing_unit.empty:
+                    unit_id = existing_unit['OrganizationalUnitID'].iloc[0]
+                    logger.info(f"Using existing organizational unit: {org_unit_name} (ID: {unit_id})")
+                else:
                     unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
                     new_unit = pd.DataFrame({
                         'OrganizationalUnitID': [unit_id],
-                        'OrganizationalUnitName': [unit],
-                        'CompanyID': [company_id]
+                        'OrganizationalUnitName': [org_unit_name],
+                        'CompanyID': [company_id],
+                        'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                        'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
                     })
                     d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
-
-    else:  # Multiple companies
-        if 'company_name' in source_df.columns:
-            for comp in source_df['company_name'].dropna().unique():
-                company_id = d_company_df['CompanyID'].max() + 1 if not d_company_df.empty else 1
-                new_company = pd.DataFrame({
+                    logger.info(f"Created new organizational unit: {org_unit_name} (ID: {unit_id})")
+            else:
+                # If no org_unit_name provided, use company name as the organizational unit name
+                unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                new_unit = pd.DataFrame({
+                    'OrganizationalUnitID': [unit_id],
+                    'OrganizationalUnitName': [company_name],  # Use company name as unit name
                     'CompanyID': [company_id],
-                    'CompanyName': [comp],
-                    'CountryID': [country_id],
-                    'Industry': [None]
+                    'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                    'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
                 })
-                d_company_df = pd.concat([d_company_df, new_company], ignore_index=True)
-                # Detect org units per company
-                if 'organizational_unit' in source_df.columns:
-                    for unit in source_df[source_df['company_name'] == comp]['organizational_unit'].dropna().unique():
+                d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                logger.info(f"Created default organizational unit using company name: {company_name} (ID: {unit_id})")
+        else:  # Multiple units
+            # Detect units from source data
+            if unit_column:
+                unique_units = source_df[unit_column].dropna().unique()
+                logger.info(f"Found {len(unique_units)} unique organizational units in column '{unit_column}'")
+                
+                for unit in unique_units:
+                    # Check if the unit already exists
+                    existing_unit = d_org_unit_df[d_org_unit_df['OrganizationalUnitName'].str.lower() == unit.lower()]
+                    if not existing_unit.empty:
+                        unit_id = existing_unit['OrganizationalUnitID'].iloc[0]
+                        logger.info(f"Using existing organizational unit: {unit} (ID: {unit_id})")
+                    else:
                         unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
                         new_unit = pd.DataFrame({
                             'OrganizationalUnitID': [unit_id],
                             'OrganizationalUnitName': [unit],
-                            'CompanyID': [company_id]
+                            'CompanyID': [company_id],
+                            'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                            'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
                         })
                         d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                        logger.info(f"Created new organizational unit: {unit} (ID: {unit_id})")
+            else:
+                logger.warning("No organizational unit column found in source data for multiple units mode")
+                # Create a default organizational unit using the company name
+                unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                new_unit = pd.DataFrame({
+                    'OrganizationalUnitID': [unit_id],
+                    'OrganizationalUnitName': [company_name],  # Use company name as unit name
+                    'CompanyID': [company_id],
+                    'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                    'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
+                })
+                d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                logger.info(f"Created default organizational unit using company name: {company_name} (ID: {unit_id})")
+
+    else:  # Multiple companies or organizational units
+        # Try to find company column
+        company_columns = ['company_name', 'company', 'organization', 'org_name']
+        company_column = None
+        for col in company_columns:
+            if col in source_df.columns:
+                company_column = col
+                logger.info(f"Found company column: {company_column}")
+                break
+        
+        if company_column:
+            # Process each unique company
+            for comp in source_df[company_column].dropna().unique():
+                # Check if company already exists
+                existing_company = d_company_df[d_company_df['CompanyName'].str.lower() == comp.lower()]
+                if not existing_company.empty:
+                    company_id = existing_company['CompanyID'].iloc[0]
+                    logger.info(f"Using existing company: {comp} (ID: {company_id})")
+                else:
+                    company_id = d_company_df['CompanyID'].max() + 1 if not d_company_df.empty else 1
+                    new_company = pd.DataFrame({
+                        'CompanyID': [company_id],
+                        'CompanyName': [comp],
+                        'CountryID': [country_id],
+                        'Industry': [None]
+                    })
+                    d_company_df = pd.concat([d_company_df, new_company], ignore_index=True)
+                    logger.info(f"Created new company: {comp} (ID: {company_id})")
+                
+                # Process organizational units for this company
+                if unit_column:
+                    # Get units for this company only
+                    company_units = source_df[source_df[company_column] == comp][unit_column].dropna().unique()
+                    logger.info(f"Found {len(company_units)} unique organizational units for company '{comp}'")
+                    
+                    for unit in company_units:
+                        # Check if unit already exists
+                        existing_unit = d_org_unit_df[d_org_unit_df['OrganizationalUnitName'].str.lower() == unit.lower()]
+                        if not existing_unit.empty:
+                            unit_id = existing_unit['OrganizationalUnitID'].iloc[0]
+                            logger.info(f"Using existing organizational unit: {unit} (ID: {unit_id})")
+                        else:
+                            unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                            new_unit = pd.DataFrame({
+                                'OrganizationalUnitID': [unit_id],
+                                'OrganizationalUnitName': [unit],
+                                'CompanyID': [company_id],
+                                'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                                'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
+                            })
+                            d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                            logger.info(f"Created new organizational unit: {unit} (ID: {unit_id})")
+                else:
+                    # Create a default organizational unit using the company name
+                    unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                    new_unit = pd.DataFrame({
+                        'OrganizationalUnitID': [unit_id],
+                        'OrganizationalUnitName': [comp],  # Use company name as unit name
+                        'CompanyID': [company_id],
+                        'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                        'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
+                    })
+                    d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                    logger.info(f"Created default organizational unit using company name: {comp} (ID: {unit_id})")
+        else:
+            # No company column found, use the provided company name
+            logger.warning("No company column found in source data for multiple companies mode")
+            company_id = d_company_df['CompanyID'].max() + 1 if not d_company_df.empty else 1
+            new_company = pd.DataFrame({
+                'CompanyID': [company_id],
+                'CompanyName': [company_name],
+                'CountryID': [country_id],
+                'Industry': [None]
+            })
+            d_company_df = pd.concat([d_company_df, new_company], ignore_index=True)
+            logger.info(f"Created default company: {company_name} (ID: {company_id})")
+            
+            # Process organizational units
+            if unit_column:
+                unique_units = source_df[unit_column].dropna().unique()
+                logger.info(f"Found {len(unique_units)} unique organizational units")
+                
+                for unit in unique_units:
+                    unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                    new_unit = pd.DataFrame({
+                        'OrganizationalUnitID': [unit_id],
+                        'OrganizationalUnitName': [unit],
+                        'CompanyID': [company_id],
+                        'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                        'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
+                    })
+                    d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                    logger.info(f"Created new organizational unit: {unit} (ID: {unit_id})")
+            else:
+                # Create a default organizational unit using the company name
+                unit_id = d_org_unit_df['OrganizationalUnitID'].max() + 1 if not d_org_unit_df.empty else 1
+                new_unit = pd.DataFrame({
+                    'OrganizationalUnitID': [unit_id],
+                    'OrganizationalUnitName': [company_name],  # Use company name as unit name
+                    'CompanyID': [company_id],
+                    'created_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]],
+                    'updated_at': [pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]]
+                })
+                d_org_unit_df = pd.concat([d_org_unit_df, new_unit], ignore_index=True)
+                logger.info(f"Created default organizational unit using company name: {company_name} (ID: {unit_id})")
 
     return d_company_df, d_org_unit_df
 

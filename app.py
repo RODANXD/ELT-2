@@ -204,6 +204,8 @@ with left_col:
                         dest_tables,
                         reporting_year,
                         org_unit_name,
+                        company_mode,   # <-- add this
+                        unit_mode  
                     )
                     
                     logger.info("Data transformation complete.")

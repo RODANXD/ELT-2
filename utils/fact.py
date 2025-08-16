@@ -20,18 +20,7 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     iso2_code = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
     
     # Special handling for Electricity (ActivitySubcategoryID 21)
-    if activity_sub_cat_id == 21:
-        # Try to find Green Electricity first
-        green_electricity = activity_emission_source_df[
-            (activity_emission_source_df['ActivitySubcategoryID'] == activity_sub_cat_id) &
-            (activity_emission_source_df['ActivityEmissionSourceName'] == 'Green Electricity')
-        ]
-        
-        if not green_electricity.empty:
-            emission_source_id = green_electricity.iloc[0]['ActivityEmissionSourceID']
-            unit_id = green_electricity.iloc[0]['UnitID']
-            emission_factor_id = f"{iso2_code}_Green_Electricity"
-            return emission_source_id, unit_id, emission_factor_id
+    
     
     # Define transformation suffixes based on calc_method
     valid_transformations = ['Distance', 'Fuel', 'Electricity', 'Heating', 'Days'] if calc_method == 'Consumption-based' else ['Currency']
@@ -126,37 +115,50 @@ def get_next_incremental_id(df: pd.DataFrame, column_name: str):
         return max_id + 1 if pd.notna(max_id) else 1
     return None
 
-def create_empty_fact_table_structure(dest_df: pd.DataFrame) -> pd.DataFrame:
-    """Create an empty dataframe with the same structure as the destination fact table"""
-    # Create empty dataframe with same columns and dtypes
-    empty_df = pd.DataFrame(columns=dest_df.columns)
+def create_empty_fact_table_structure(dest_schema) -> pd.DataFrame:
+    """
+    Creates an empty DataFrame with the same structure as the destination fact table.
     
-    # Preserve the column data types
-    for column in dest_df.columns:
-        try:
-            empty_df[column] = empty_df[column].astype(dest_df[column].dtype)
-        except:
-            # If dtype conversion fails, keep as object
-            pass
-    
-    # Explicitly ensure it's empty
-    empty_df = empty_df.iloc[0:0].copy()
-    
-    logging.info(f"Created empty fact table structure with {len(empty_df)} rows and columns: {list(empty_df.columns)}")
-    return empty_df
+    Args:
+        dest_schema (pd.DataFrame): Destination fact table DataFrame
+        
+    Returns:
+        pd.DataFrame: Empty dataframe with fact table structure
+    """
+    try:
+        # Create empty DataFrame with same columns as destination schema
+        empty_df = pd.DataFrame(columns=dest_schema.columns)
+        
+        # Preserve the column data types from source DataFrame
+        for column in dest_schema.columns:
+            try:
+                empty_df[column] = empty_df[column].astype(dest_schema[column].dtype)
+            except:
+                # If type conversion fails, keep as object type
+                empty_df[column] = empty_df[column].astype('object')
+        
+        logging.info(f"Created empty fact table structure with columns: {list(empty_df.columns)}")
+        return empty_df
+        
+    except Exception as e:
+        logging.error(f"Error creating empty fact table structure: {str(e)}")
+        raise Exception(f"Failed to create empty fact table structure: {str(e)}")
 
 
 
 
-
-def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame,
-                  activity_cat_df: pd.DataFrame, activity_subcat_df: pd.DataFrame,
-                  scope_df: pd.DataFrame, activity_emission_source_df: pd.DataFrame,
-                  activity_emmission_source_provider_df: pd.DataFrame, unit_df: pd.DataFrame,
-                  currency_df: pd.DataFrame, date_df: pd.DataFrame, country_df: pd.DataFrame,
-                  company_df: pd.DataFrame, company: str, country: str, activity_cat: str, 
-                  activity_subcat: str, reporting_year: int, calc_method: str, 
-                  org_unit_df: pd.DataFrame = None, dest_tables: dict = None) -> pd.DataFrame:    
+def generate_fact(
+    mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame,
+    activity_cat_df: pd.DataFrame, activity_subcat_df: pd.DataFrame,
+    scope_df: pd.DataFrame, activity_emission_source_df: pd.DataFrame,
+    activity_emmission_source_provider_df: pd.DataFrame, unit_df: pd.DataFrame,
+    currency_df: pd.DataFrame, date_df: pd.DataFrame, country_df: pd.DataFrame,
+    company_df: pd.DataFrame, company: str, country: str, activity_cat: str,
+    activity_subcat: str, reporting_year: int, calc_method: str,
+    org_unit_df: pd.DataFrame = None, dest_tables: dict = None,
+    *, is_multiple_units: bool = False, unit_column: str = None   # << NEW
+) -> pd.DataFrame:
+    print("\n\n*** USING MODIFIED FACT.PY WITH ORGANIZATIONAL UNIT ID FIX ***\n\n")
 
     # Record start time
     start_time = datetime.now()
@@ -277,6 +279,28 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
         # Get IDs and ensure they are integers
         company_id = lookup_value(company_df, 'CompanyName', company, 'CompanyID')
         new_row['CompanyID'] = int(company_id) if company_id is not None else None
+        # Handle OrganizationalUnitID
+        # ----------------------------------------------------------
+# OrganisationalUnitID assignment
+# ----------------------------------------------------------
+        if is_multiple_units and unit_column and unit_column in source_df.columns:
+            unit_name = source_row.get(unit_column)
+            if unit_name and not org_unit_df.empty:
+                matched = org_unit_df[
+                    org_unit_df['OrganizationalUnitName'].str.lower() == str(unit_name).lower()
+                ]
+                new_row['OrganizationalUnitID'] = (
+                    int(matched['OrganizationalUnitID'].iloc[0]) if not matched.empty else None
+                )
+            else:
+                new_row['OrganizationalUnitID'] = None
+        else:
+            # single-unit mode – use the one and only unit
+            new_row['OrganizationalUnitID'] = (
+                int(org_unit_df['OrganizationalUnitID'].iloc[0]) if not org_unit_df.empty else None
+            )
+        # ----------------------------------------------------------
+        
         
         country_id = lookup_value(country_df, 'CountryName', country, 'CountryID')
         new_row['CountryID'] = int(country_id) if country_id is not None else None
@@ -287,44 +311,54 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
         activity_subcat_id = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
         new_row['ActivitySubcategoryID'] = int(activity_subcat_id) if activity_subcat_id is not None else None
         
+        new_row['OrganizationalUnitID'] = int(org_unit_df.loc[0, 'OrganizationalUnitID']) if not org_unit_df.empty else None
+        
+        
         scope_id = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ScopeID')
         new_row['ScopeID'] = int(scope_id) if scope_id is not None else None
         
         # Handle ActivityEmissionSourceID
-        if emission_source_id is not None:
-            new_row['ActivityEmissionSourceID'] = int(emission_source_id)
-        else:
-            # Try to find ActivityEmissionSourceID from source data if available
-            source_col = None
-            if isinstance(mappings, dict) and 'ActivityEmissionSourceID' in mappings and isinstance(mappings['ActivityEmissionSourceID'], dict):
-                source_col = mappings['ActivityEmissionSourceID'].get('source_column')
+        # --- Resolve ActivityEmissionSourceID & ActivitySubcategoryID from source energy type ---
+        # Detect energy type column robustly
+        energy_col = None
+        for col in source_df.columns:
+            norm = col.strip().lower().replace('_', ' ').replace('-', ' ')
+            if norm in ('energy type', 'energy_type',
+                        'ActivityEmissionSourceName'):
+                energy_col = col
+                break
             
-            if source_col and source_col in source_df.columns and not pd.isna(source_row[source_col]):
-                new_row['ActivityEmissionSourceID'] = int(source_row[source_col])
-            else:
-                # Check for Green Electricity source for ActivitySubcategoryID 21
-                activity_subcategory_id = new_row.get('ActivitySubcategoryID')
-                if activity_subcategory_id == 21:
-                    # Filter for Green Electricity sources
-                    green_electricity_sources = activity_emission_source_df[
-                        (activity_emission_source_df['ActivitySubcategoryID'] == 21) &
-                        (activity_emission_source_df['ActivityEmissionSourceName'] == 'Green Electricity')
-                    ]
-                    if not green_electricity_sources.empty:
-                        new_row['ActivityEmissionSourceID'] = int(green_electricity_sources.iloc[0]['ActivityEmissionSourceID'])
-                    else:
-                        # Default to first emission source ID if available
-                        if not activity_emission_source_df.empty:
-                            new_row['ActivityEmissionSourceID'] = int(activity_emission_source_df['ActivityEmissionSourceID'].iloc[0])
-                        else:
-                            new_row['ActivityEmissionSourceID'] = None
-                else:
-                    # Default to first emission source ID if available
-                    if not activity_emission_source_df.empty:
-                        new_row['ActivityEmissionSourceID'] = int(activity_emission_source_df['ActivityEmissionSourceID'].iloc[0])
-                    else:
-                        new_row['ActivityEmissionSourceID'] = None
-        
+        resolved_emission_source_id = None
+        resolved_activity_subcat_from_energy = None
+
+        if energy_col and energy_col in source_row:
+            raw_energy = source_row.get(energy_col)
+            if pd.notna(raw_energy):
+                key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
+                key = " ".join(key.split())  # collapse whitespace
+
+                # Build normalized view of DE1_ActivityEmissionSource for matching
+                aes_df_norm = activity_emission_source_df.copy()
+                aes_df_norm['_norm'] = (
+                    aes_df_norm['ActivityEmissionSourceName'].astype(str)
+                    .str.lower().str.replace('_', ' ', regex=False)
+                    .str.replace('-', ' ', regex=False)
+                    .str.replace(r'\s+', ' ', regex=True).str.strip()
+                )
+
+                match = aes_df_norm[aes_df_norm['_norm'] == key]
+                if not match.empty:
+                    resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
+                    if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
+                        resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
+
+        # Assign resolved IDs
+        new_row['ActivityEmissionSourceID'] = resolved_emission_source_id if resolved_emission_source_id is not None else None
+
+        # If we got subcategory from the energy type, override the earlier generic subcategory
+        if resolved_activity_subcat_from_energy is not None:
+            new_row['ActivitySubcategoryID'] = resolved_activity_subcat_from_energy
+
         # Map UnitID based on the unit name in the raw data
         unit_id = None
         unit_col = None
@@ -361,7 +395,7 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
                     emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
             
             if country_iso2 and emission_source_name:
-                new_row['EmissionFactorID'] = f"{country_iso2}_{emission_source_name}"
+                new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
             else:
                 new_row['EmissionFactorID'] = None
 
@@ -480,72 +514,13 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
                         new_row[field_name] = None  # No providers available
             
             # Handle OrganizationalUnitID (note: there might be a space in the column name)
-            if field_name == 'OrganizationalUnitID' or field_name == 'OrganizationalUnitID ':
+            if field_name.strip() == 'OrganizationalUnitID':
                 # Use the correct field name with space for the new_row
                 actual_field_name = 'OrganizationalUnitID ' if 'OrganizationalUnitID ' in dest_df.columns else 'OrganizationalUnitID'
                 
-                if source_column and source_column in source_df.columns:
-                    org_unit_name = source_row[source_column]
-                    # Try to find the organizational unit in the provided org_unit_df
-                    if org_unit_df is not None and not org_unit_df.empty:
-                        org_unit_id = lookup_value(org_unit_df, 'OrganizationalUnitName', org_unit_name, 'OrganizationalUnitID')
-                        new_row[actual_field_name] = int(org_unit_id) if org_unit_id is not None else None  # Use None if not found
-                    else:
-                        # If org_unit_df is empty, try to find the organizational unit in the destination tables
-                        if dest_tables and 'D_OrganizationalUnit' in dest_tables:
-                            org_unit_df_dest = dest_tables['D_OrganizationalUnit']
-                            # Try to find by company name if available
-                            if company and not org_unit_df_dest.empty:
-                                # First try to find by exact org unit name
-                                org_unit_row = org_unit_df_dest[org_unit_df_dest['OrganizationalUnitName'].str.lower() == org_unit_name.lower() if org_unit_name else False]
-                                if not org_unit_row.empty:
-                                    new_row[actual_field_name] = int(org_unit_row['OrganizationalUnitID'].iloc[0])
-                                else:
-                                    # Try to find by company name
-                                    company_id = None
-                                    if 'D_Company' in dest_tables:
-                                        company_df = dest_tables['D_Company']
-                                        company_row = company_df[company_df['CompanyName'].str.lower() == company.lower()]
-                                        if not company_row.empty:
-                                            company_id = int(company_row['CompanyID'].iloc[0])
-                                    
-                                    if company_id is not None:
-                                        # Find organizational units for this company
-                                        company_org_units = org_unit_df_dest[org_unit_df_dest['CompanyID'] == company_id]
-                                        if not company_org_units.empty:
-                                            # Use the first organizational unit for this company
-                                            new_row[actual_field_name] = int(company_org_units['OrganizationalUnitID'].iloc[0])
-                                        else:
-                                            new_row[actual_field_name] = None  # No org units found for this company
-                                    else:
-                                        new_row[actual_field_name] = None  # Company not found
-                            else:
-                                new_row[actual_field_name] = None  # No company name provided
-                        else:
-                            new_row[actual_field_name] = None  # No destination tables provided
-                else:
-                    # If no mapping exists, try to find the organizational unit by company name
-                    if dest_tables and 'D_OrganizationalUnit' in dest_tables and company:
-                        org_unit_df_dest = dest_tables['D_OrganizationalUnit']
-                        company_id = None
-                        if 'D_Company' in dest_tables:
-                            company_df = dest_tables['D_Company']
-                            company_row = company_df[company_df['CompanyName'].str.lower() == company.lower()]
-                            if not company_row.empty:
-                                company_id = int(company_row['CompanyID'].iloc[0])
+                # Always set the organizational unit ID to 1 since we know there's only one unit
+                            
                         
-                        if company_id is not None and not org_unit_df_dest.empty:
-                            # Find organizational units for this company
-                            company_org_units = org_unit_df_dest[org_unit_df_dest['CompanyID'] == company_id]
-                            if not company_org_units.empty:
-                                # Use the first organizational unit for this company
-                                new_row[actual_field_name] = int(company_org_units['OrganizationalUnitID'].iloc[0])
-                            else:
-                                new_row[actual_field_name] = None  # No org units found for this company
-                        else:
-                            new_row[actual_field_name] = None  # Company not found
-                    else:
-                        new_row[actual_field_name] = None  # No destination tables or company provided
                     
             # Handle EmissionFactorID
             if field_name == 'EmissionFactorID':
@@ -566,27 +541,32 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
                             activity_subcategory_id = new_row.get('ActivitySubcategoryID')
                             
                             # Filter for Green Electricity (ActivitySubcategoryID = 21)
-                            if activity_subcategory_id == 21:
-                                # Find the emission source with the given ID
-                                emission_source_row = activity_emission_source_df[
-                                    (activity_emission_source_df['ActivityEmissionSourceID'] == activity_emission_source_id) &
-                                    (activity_emission_source_df['ActivitySubcategoryID'] == activity_subcategory_id)
-                                ]
-                                
-                                if not emission_source_row.empty:
-                                    activity_emission_source_name = emission_source_row.iloc[0]['ActivityEmissionSourceName']
-                                    
-                                    # Concatenate ISO2Code and ActivityEmissionSourceName
-                                    if country_iso2code and activity_emission_source_name:
-                                        emission_factor_id = f"{country_iso2code}_{activity_emission_source_name.replace(' ', '_')}"
-                                        new_row[field_name] = emission_factor_id
-                                    else:
-                                        # Default if we can't generate a proper ID
-                                        new_row[field_name] = "Unknown_EmissionFactor"
+                            if field_name == 'EmissionFactorID':
+    # Check if we have a direct mapping
+                                if source_column and source_column in source_df.columns:
+                                    emission_factor_id = source_row[source_column]
+                                    new_row[field_name] = emission_factor_id
                                 else:
-                                    new_row[field_name] = "Unknown_EmissionFactor"
-                            else:
-                                new_row[field_name] = "Unknown_EmissionFactor"
+                                    # Generate EmissionFactorID dynamically from ISO2Code + ActivityEmissionSourceName
+                                    country_id = new_row.get('CountryID')
+                                    activity_emission_source_id = new_row.get('ActivityEmissionSourceID')
+                            
+                                    country_iso2code = None
+                                    if country_id and not pd.isna(country_id) and not country_df.empty:
+                                        country_iso2code = lookup_value(country_df, 'CountryID', country_id, 'ISO2Code')
+                            
+                                    emission_source_name = None
+                                    if activity_emission_source_id and not pd.isna(activity_emission_source_id) and not activity_emission_source_df.empty:
+                                        row = activity_emission_source_df[
+                                            activity_emission_source_df['ActivityEmissionSourceID'] == activity_emission_source_id
+                                        ]
+                                        if not row.empty:
+                                            emission_source_name = row.iloc[0]['ActivityEmissionSourceName']
+                            
+                                    if country_iso2code and emission_source_name:
+                                        new_row[field_name] = f"{country_iso2code}_{emission_source_name.replace(' ', '_')}"
+                                    else:
+                                        new_row[field_name] = "Unknown_EmissionFactor"
                         else:
                             new_row[field_name] = "Unknown_EmissionFactor"
                     else:
@@ -609,7 +589,9 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
         update_progress(processed=index + 1)
         
         # Add the new row to the result DataFrame
+        print(f"Debug - Final new_row before adding to result_df: {new_row}")
         result_df = pd.concat([result_df, pd.DataFrame([new_row])], ignore_index=True)
+        print(f"Debug - result_df after adding new row: {result_df.tail(1)}")
 
     # Record end time and calculate duration
     end_time = datetime.now()

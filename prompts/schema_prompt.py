@@ -153,7 +153,7 @@ def build_prompt(source_columns, dest_schema, source_table_name,calc_method, act
     output_instruction = """
                             Output Instructions:
 
-                            FE1_EmissionActivityData (EmissionActivityID, DateKey, CountryID, CompanyID, ActivityCategoryID, ActivitySubcategoryID, ActivityEmissionSourceID, ActivityEmissionSourceProviderID, EmissionFactorID, PaidAmount, CurrencyID, ConsumptionAmount, UnitID, ScopeID)
+                            FE1_EmissionActivityData (EmissionActivityID, DateKey, CountryID, CompanyID, OrganizationalUnitID, ActivityCategoryID, ActivitySubcategoryID, ActivityEmissionSourceID, ActivityEmissionSourceProviderID, EmissionFactorID, PaidAmount, CurrencyID, ConsumptionAmount, UnitID, ScopeID)
                             PK: EmissionActivityID
 
                             output JSON should consist
