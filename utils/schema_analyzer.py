@@ -94,7 +94,7 @@ def _infer_unit_hints_from_headers(columns):
     if not columns:
         return hints
     synonyms = {
-        'kwh':'kwh','mwh':'mwh','wh':'wh','kw':'kw','mw':'mw','m3':'m3','m^3':'m3',
+        'kwh':'kwh','mwh':'mwh','wh':'wh','kw':'kw','mw':'mw','m3':'m3','m^3':'m3','m3':'m³',
         'kg':'kg','t':'t','ton':'t','tonne':'t','tonnes':'t','l':'l','lt':'l',
         'liter':'l','litre':'l','liters':'l','litres':'l','km':'km','mi':'mi'
     }

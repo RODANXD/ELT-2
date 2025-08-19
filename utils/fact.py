@@ -9,7 +9,7 @@ from rich import print as rprint
 import streamlit as st
 from .progress_state import update_progress
 from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
-from .mapping_utils import normalize_text, fuzzy_match_value_to_list
+from .mapping_utils import normalize_text, fuzzy_match_value_to_list, normalize_unit, extract_unit_from_column
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -332,7 +332,7 @@ def generate_fact(
         # Detect energy type column robustly
         energy_col = None
         # broaden detection to many possible energy/ source columns
-        energy_candidates = ['energy', 'energy origin', 'energyorigin', 'supply', 'supplycategory', 'subcategory', 'fuel', 'source', 'energy_type', 'activityemissionsourcename']
+        energy_candidates = ['energy', 'energy origin', 'energyorigin', 'supply', 'supplycategory', 'EnergyOrigin', 'subcategory', 'fuel', 'source', 'energy_type', 'activityemissionsourcename']
         for col in source_df.columns:
             if not isinstance(col, str):
                 continue
@@ -347,35 +347,114 @@ def generate_fact(
         resolved_emission_source_id = None
         resolved_activity_subcat_from_energy = None
 
+        # Define common energy type mappings to standardize source values
+        energy_type_mappings = {
+            # Green electricity mappings
+            'green': 'Green Electricity',
+            'renewable': 'Green Electricity',
+            'solar': 'Green Electricity',  # Keep solar as Green Electricity
+            'wind': 'Green Electricity',
+            'hydro': 'Green Electricity',
+            'clean': 'Green Electricity',
+            
+            # Conventional electricity mappings
+            'conventional': 'Conventional Electricity',
+            'fossil': 'Conventional Electricity',
+            'coal': 'Conventional Electricity',
+            'gas fired': 'Conventional Electricity',
+            'non-renewable': 'Conventional Electricity',
+            'grid': 'Conventional Electricity',
+            
+            # Biomass electricity mappings
+            'biomass': 'Biomass Electricity',
+            'organic': 'Biomass Electricity',
+            'biofuel': 'Biomass Electricity',
+            'waste': 'Biomass Electricity',
+            'solar ppa': 'Biomass Electricity',  # Map solar PPA to Biomass Electricity as requested
+            
+            # Natural gas mappings
+            'natural gas': 'Natural Gas',
+            'lng': 'Natural Gas',
+            'methane': 'Natural Gas',
+            
+            # Biomass heating mappings
+            'biomass heating': 'Biomass Heating',
+            'wood': 'Biomass Heating',
+            'pellet': 'Biomass Heating',
+            
+            # District heating mappings
+            'district': 'District Heating',
+            'district heating': 'District Heating',
+            'central heating': 'District Heating'
+        }
+
         if energy_col and energy_col in source_row:
             raw_energy = source_row.get(energy_col)
             if pd.notna(raw_energy):
-                # try fuzzy mapping to ActivityEmissionSourceName
-                candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
-                mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
-                if mapped:
-                    row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
+                # First try direct mapping using our predefined mappings
+                raw_energy_normalized = str(raw_energy).strip().lower()
+                
+                # Log the energy type for debugging
+                logging.info(f"Processing energy type: '{raw_energy_normalized}'")
+                
+                # Check if we have a direct mapping for this energy type - first try exact match
+                mapped_energy_type = None
+                # First try exact match
+                if raw_energy_normalized in energy_type_mappings:
+                    mapped_energy_type = energy_type_mappings[raw_energy_normalized]
+                    logging.info(f"Mapped '{raw_energy_normalized}' to '{mapped_energy_type}' using exact match")
+                # Then try substring match
+                else:
+                    for source_type, dest_type in energy_type_mappings.items():
+                        if source_type in raw_energy_normalized:
+                            mapped_energy_type = dest_type
+                            logging.info(f"Mapped '{raw_energy_normalized}' to '{mapped_energy_type}' using substring match")
+                            break
+                
+                # If we found a mapping, look up the corresponding ID
+                if mapped_energy_type:
+                    row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'] == mapped_energy_type]
                     if not row.empty:
                         resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
                         if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
                             resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
-                else:
-                    # fallback: try normalize and direct match
-                    key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
-                    key = " ".join(key.split())
-                    aes_df_norm = activity_emission_source_df.copy()
-                    aes_df_norm['_norm'] = (
-                        aes_df_norm['ActivityEmissionSourceName'].astype(str)
-                        .str.lower().str.replace('_', ' ', regex=False)
-                        .str.replace('-', ' ', regex=False)
-                        .str.replace(r'\s+', ' ', regex=True).str.strip()
-                    )
+                        logging.info(f"Found ID {resolved_emission_source_id} for '{mapped_energy_type}'")
+                
+                # If no direct mapping found, try fuzzy matching to ActivityEmissionSourceName
+                if resolved_emission_source_id is None:
+                    candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+                    mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
+                    if mapped:
+                        row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
+                        if not row.empty:
+                            resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
+                            if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
+                                resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
+                            logging.info(f"Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
+                    else:
+                        # fallback: try normalize and direct match
+                        key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
+                        key = " ".join(key.split())
+                        aes_df_norm = activity_emission_source_df.copy()
+                        aes_df_norm['_norm'] = (
+                            aes_df_norm['ActivityEmissionSourceName'].astype(str)
+                            .str.lower().str.replace('_', ' ', regex=False)
+                            .str.replace('-', ' ', regex=False)
+                            .str.replace(r'\s+', ' ', regex=True).str.strip()
+                        )
 
-                    match = aes_df_norm[aes_df_norm['_norm'] == key]
-                    if not match.empty:
-                        resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
-                        if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
-                            resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
+                        match = aes_df_norm[aes_df_norm['_norm'] == key]
+                        if not match.empty:
+                            resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
+                            if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
+                                resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
+                            logging.info(f"Direct matched normalized '{key}' to ID {resolved_emission_source_id}")
+                
+                # If we still couldn't find a match, log a warning
+                if resolved_emission_source_id is None:
+                    logging.warning(f"Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
+                    # st.warning(f"⚠️ Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName. Using default if available.")
+
 
         # Assign resolved IDs
         new_row['ActivityEmissionSourceID'] = resolved_emission_source_id if resolved_emission_source_id is not None else None
@@ -395,12 +474,28 @@ def generate_fact(
                 if col.lower() in ['consumption_unit', 'unit', 'unitname']:
                     unit_col = col
                     break
+        # Try to get unit from column, else infer from headers
+        unit_name = None
         if unit_col and unit_col in source_df.columns:
             unit_name = source_row[unit_col]
-            # Lookup UnitID from unit_df
-            unit_id_lookup = unit_df[unit_df['UnitName'].astype(str) == str(unit_name)]
+        else:
+            # Try to infer from column names (e.g., 'consumption_m3', 'EmissionFactor_kgCO2e_per_m3')
+            for col in source_df.columns:
+                inferred_unit = extract_unit_from_column(col)
+                if inferred_unit:
+                    unit_name = inferred_unit
+                    break
+                
+        if unit_name:
+            normalized_unit_name = normalize_unit(unit_name)
+            unit_id_lookup = unit_df[unit_df['UnitName'].astype(str) == normalized_unit_name]
             if not unit_id_lookup.empty:
                 unit_id = int(unit_id_lookup['UnitID'].iloc[0])
+            else:
+                unit_id = None
+        else:
+            unit_id = None
+        
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
         
         # Handle EmissionFactorID
@@ -420,9 +515,15 @@ def generate_fact(
                     emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
             
             if country_iso2 and emission_source_name:
+                # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
                 new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
+                logging.info(f"Generated EmissionFactorID: {new_row['EmissionFactorID']}")
             else:
                 new_row['EmissionFactorID'] = None
+                if not country_iso2:
+                    logging.warning(f"Missing country_iso2 for EmissionFactorID generation")
+                if not emission_source_name:
+                    logging.warning(f"Missing emission_source_name for EmissionFactorID generation")
 
         date_key = get_date_key(date_df, mappings.get('DateKey', {}).get('source_column'), reporting_year, source_row.get(mappings.get('DateKey', {}).get('source_column')))
         new_row['DateKey'] = int(date_key) if date_key is not None else None

@@ -104,14 +104,17 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
     """
     base_rules = """
 
-    INFERENCE RULES (Generalizability):
-- If no explicit currency column exists, infer currency from column NAMES that embed ISO codes (e.g., Paid_EUR, TotalPaidEUR, Amount-USD, Price_GBP).
-- If multiple currencies appear in different headers, choose the one associated with the chosen financial amount column; otherwise prefer the most frequent.
-- If no explicit unit column exists, infer unit from headers:
-  • Suffix tokens like Consumption_kWh, Distance_km map to UnitID (kWh/km).
-  • Expressions like EmissionFactor_kgCO2e_per_m3 imply the consumption unit is m3 (take token after 'per_').
-  • Bracketed units such as Volume (m3) or Energy (kWh) also indicate the unit.
-- Do not hard-code to a sample dataset; always analyze headers + sample values to adapt to new schemas.
+       GENERALIZABILITY & DYNAMIC INFERENCE RULES:
+    - Do NOT assume any specific column names. Always analyze both column names and sample values.
+    - If a required field (e.g., Unit, Currency, Date) is not present as a column, infer it from:
+        • Suffixes or prefixes in column names (e.g., 'consumption_m3' → unit is 'm³')
+        • Patterns like 'per_<unit>' in column names (e.g., 'EmissionFactor_kgCO2e_per_m3' → unit is 'm³')
+        • Bracketed units (e.g., 'Volume (m3)' → unit is 'm³')
+        • Common abbreviations and synonyms (e.g., 'm3', 'm³', 'M3' all mean 'm³')
+    - Use fuzzy matching and normalization for units and currencies (e.g., 'm3' ≈ 'm³', 'eur' ≈ 'EUR').
+    - If multiple possible mappings exist, choose the most semantically relevant based on data patterns and sample values.
+    - If no mapping is possible, set the field to null and provide a reason in the unresolved report.
+    - Always adapt to the actual source schema and data, not to a fixed template.
 
 
     INTELLIGENT MAPPING RULES:
@@ -136,6 +139,22 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
     5. LOCATION MAPPING:
        - Look for country, city, location, place, origin, destination columns
        - Consider for geographic relationships
+       
+    6. UNIT MAPPING:
+       - Look for unit, measurement, metric, quantity columns 
+       - Map to UnitID with appropriate unit conversion
+       - Consider unit suffixes or prefixes for unit identification
+       - If a source column name contains a unit (e.g., 'consumption_m3', 'EmissionFactor_kgCO2e_per_m3'), infer the unit (e.g., 'm3') and map to the correct UnitID in the destination schema.
+       - If a source column contains energy type information (e.g., 'SupplyCategory', 'EnergyOrigin'), map its values to the canonical names in the destination schema using semantic/fuzzy matching.
+       - For energy origin/type mapping, use these standard mappings:
+           * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar ppa
+           * Conventional Electricity: conventional, fossil, coal, gas fired, non-renewable, grid
+           * Biomass Electricity: biomass, organic, biofuel, waste
+           * Natural Gas: natural gas, lng, methane
+           * Biomass Heating: biomass heating, wood, pellet
+           * District Heating: district, district heating, central heating
+       - Use the provided list of ActivityEmissionSourceName from the destination schema for mapping.
+
     """
     
     # Add specific rules based on calculation method
@@ -152,7 +171,7 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
     
     EXPENSE-BASED SPECIFIC RULES:
     - Primary focus: Financial amounts and costs
-    - ConsumptionAmount should default to 1.0 or derive from financial data
+    - ConsumptionAmount should default to 0 or derive from financial data
     - Focus on mapping PaidAmount accurately
     """
     
@@ -203,8 +222,16 @@ def get_activity_specific_rules(activity_cat: str, activity_sub_cat: str) -> str
     elif 'energy' in activity_cat.lower() or 'electricity' in activity_sub_cat.lower():
         rules += """
     - Look for energy consumption columns (kwh, mwh, energy_usage, consumption)
-    - Look for energy type columns (electricity, gas, renewable, grid)
+    - Look for energy type columns (electricity, gas, renewable, grid, energy_origin, energyorigin, energy_type, supply, supplycategory)
     - ConsumptionAmount: "Energy" or "Electricity" type
+    - For energy origin/type mapping, use these standard mappings:
+        * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar ppa
+        * Conventional Electricity: conventional, fossil, coal, gas fired, non-renewable, grid
+        * Biomass Electricity: biomass, organic, biofuel, waste
+        * Natural Gas: natural gas, lng, methane
+        * Biomass Heating: biomass heating, wood, pellet
+        * District Heating: district, district heating, central heating
+    - Map source energy type values to destination ActivityEmissionSourceName using semantic matching
     """
     
     return rules
@@ -384,7 +411,26 @@ def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name
         },
         "ActivityEmissionSourceID": {
             "source_column": "<energy_type_column_or_null>",
-            "transformation": "<lookup_logic_or_auto_detect>",
+            "transformation": "map_energy_type_to_emission_source",
+            "mapping": {
+                "green": "Green Electricity",
+                "renewable": "Green Electricity",
+                "solar": "Green Electricity",
+                "solar ppa": "Green Electricity",
+                "wind": "Green Electricity",
+                "hydro": "Green Electricity",
+                "clean": "Green Electricity",
+                "conventional": "Conventional Electricity",
+                "fossil": "Conventional Electricity",
+                "coal": "Conventional Electricity",
+                "gas fired": "Conventional Electricity",
+                "non-renewable": "Conventional Electricity",
+                "grid": "Conventional Electricity",
+                "biomass": "Biomass Electricity",
+                "organic": "Biomass Electricity",
+                "biofuel": "Biomass Electricity",
+                "waste": "Biomass Electricity"
+            },
             "relation": "DE1_ActivityEmissionSource.ActivityEmissionSourceID->FE1_EmissionActivityData.ActivityEmissionSourceID"
         },
         "ActivityEmissionSourceProviderID": {
