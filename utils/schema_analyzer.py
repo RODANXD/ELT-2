@@ -63,3 +63,79 @@ def analyze_source_schema(df: pd.DataFrame) -> Dict[str, Any]:
             analysis['potential_keys'].append(col)
             
     return analysis
+
+import re
+
+def _infer_currency_hints_from_headers(columns):
+    """Find 3-letter ISO currency codes in column names (Paid_EUR, TotalPaidEUR, Amount-USD, etc.)."""
+    hints = set()
+    if not columns:
+        return hints
+    iso = {
+        "USD","EUR","GBP","INR","JPY","CAD","AUD","CHF","CNY","SEK","NOK","DKK","PLN",
+        "CZK","HUF","RUB","BRL","ZAR","MXN","NZD","SGD","HKD","AED","SAR","TRY","KRW",
+        "TWD","IDR","THB","MYR"
+    }
+    pat = re.compile(r'(?i)(?:^|[_-])([A-Z]{3})(?:$|[_-])')
+    for col in columns:
+        upper = col.upper().replace(" ", "_")
+        for code in iso:
+            if (upper.endswith(code) or upper.endswith("_"+code) or
+                upper.startswith(code+"_") or ("_"+code+"_") in upper):
+                hints.add(code)
+        m = pat.search(upper)
+        if m and m.group(1).upper() in iso:
+            hints.add(m.group(1).upper())
+    return hints
+
+def _infer_unit_hints_from_headers(columns):
+    """Find consumption units from headers (Consumption_kWh, EmissionFactor_*_per_m3, Energy (kWh))."""
+    hints = set()
+    if not columns:
+        return hints
+    synonyms = {
+        'kwh':'kwh','mwh':'mwh','wh':'wh','kw':'kw','mw':'mw','m3':'m3','m^3':'m3',
+        'kg':'kg','t':'t','ton':'t','tonne':'t','tonnes':'t','l':'l','lt':'l',
+        'liter':'l','litre':'l','liters':'l','litres':'l','km':'km','mi':'mi'
+    }
+    per_pat = re.compile(r'(?i)per[_-]([a-z0-9^]+)')
+    suf_pat = re.compile(r'(?i)[_-]([a-z0-9^]+)$')
+    br_pat  = re.compile(r'\(([^)]+)\)')  # Volume (m3)
+
+    for col in columns:
+        if not isinstance(col, str):
+            continue
+        low = col.lower().replace(" ", "_")
+
+        # ... per_<unit>
+        for m in per_pat.finditer(low):
+            key = synonyms.get(m.group(1), m.group(1))
+            hints.add(key)
+
+        # ... suffix _unit or short suffix like _m3
+        m = suf_pat.search(low)
+        if m:
+            key = synonyms.get(m.group(1), m.group(1))
+            hints.add(key)
+
+        # ... bracketed units
+        for m in br_pat.finditer(col):
+            key = m.group(1).lower()
+            if ' per ' in key:
+                last = key.split(' per ')[-1].strip()
+                last = synonyms.get(last, last)
+                hints.add(last)
+            else:
+                key = synonyms.get(key, key)
+                hints.add(key)
+
+        # extra heuristics: look for patterns like '_per_m3' or '_m3' anywhere
+        extra = re.findall(r'per[_-]?([a-z0-9^]+)', low)
+        for ex in extra:
+            hints.add(synonyms.get(ex, ex))
+
+        extra2 = re.findall(r'_([a-z0-9^]{1,4})($|_)', low)
+        for ex, _ in extra2:
+            hints.add(synonyms.get(ex, ex))
+
+    return {h for h in hints if h and len(h) <= 5}

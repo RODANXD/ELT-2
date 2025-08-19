@@ -9,6 +9,7 @@ from rich import print as rprint
 import streamlit as st
 from .progress_state import update_progress
 from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
+from .mapping_utils import normalize_text, fuzzy_match_value_to_list
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -41,9 +42,18 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
         return None, None, None
     
     # Get emission source ID by suffix
+    # Try to match emission source intelligently: by suffix first, else fuzzy match on names
     emission_source_id = get_emission_source_id_by_suffix(
         activity_emission_source_df, activity_sub_cat_id, transformation
     )
+    if not emission_source_id:
+        # fuzzy match transformation to ActivityEmissionSourceName
+        candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+        mapped = fuzzy_match_value_to_list(transformation, candidates, threshold=60) if transformation else None
+        if mapped:
+            row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
+            if not row.empty:
+                emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
     
     if not emission_source_id:
         logging.warning(f"No emission source ID found for {activity_subcat}")
@@ -321,11 +331,17 @@ def generate_fact(
         # --- Resolve ActivityEmissionSourceID & ActivitySubcategoryID from source energy type ---
         # Detect energy type column robustly
         energy_col = None
+        # broaden detection to many possible energy/ source columns
+        energy_candidates = ['energy', 'energy origin', 'energyorigin', 'supply', 'supplycategory', 'subcategory', 'fuel', 'source', 'energy_type', 'activityemissionsourcename']
         for col in source_df.columns:
+            if not isinstance(col, str):
+                continue
             norm = col.strip().lower().replace('_', ' ').replace('-', ' ')
-            if norm in ('energy type', 'energy_type',
-                        'ActivityEmissionSourceName'):
-                energy_col = col
+            for cand in energy_candidates:
+                if cand in norm:
+                    energy_col = col
+                    break
+            if energy_col:
                 break
             
         resolved_emission_source_id = None
@@ -334,23 +350,32 @@ def generate_fact(
         if energy_col and energy_col in source_row:
             raw_energy = source_row.get(energy_col)
             if pd.notna(raw_energy):
-                key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
-                key = " ".join(key.split())  # collapse whitespace
+                # try fuzzy mapping to ActivityEmissionSourceName
+                candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+                mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
+                if mapped:
+                    row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
+                    if not row.empty:
+                        resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
+                        if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
+                            resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
+                else:
+                    # fallback: try normalize and direct match
+                    key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
+                    key = " ".join(key.split())
+                    aes_df_norm = activity_emission_source_df.copy()
+                    aes_df_norm['_norm'] = (
+                        aes_df_norm['ActivityEmissionSourceName'].astype(str)
+                        .str.lower().str.replace('_', ' ', regex=False)
+                        .str.replace('-', ' ', regex=False)
+                        .str.replace(r'\s+', ' ', regex=True).str.strip()
+                    )
 
-                # Build normalized view of DE1_ActivityEmissionSource for matching
-                aes_df_norm = activity_emission_source_df.copy()
-                aes_df_norm['_norm'] = (
-                    aes_df_norm['ActivityEmissionSourceName'].astype(str)
-                    .str.lower().str.replace('_', ' ', regex=False)
-                    .str.replace('-', ' ', regex=False)
-                    .str.replace(r'\s+', ' ', regex=True).str.strip()
-                )
-
-                match = aes_df_norm[aes_df_norm['_norm'] == key]
-                if not match.empty:
-                    resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
-                    if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
-                        resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
+                    match = aes_df_norm[aes_df_norm['_norm'] == key]
+                    if not match.empty:
+                        resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
+                        if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
+                            resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
 
         # Assign resolved IDs
         new_row['ActivityEmissionSourceID'] = resolved_emission_source_id if resolved_emission_source_id is not None else None
@@ -589,9 +614,9 @@ def generate_fact(
         update_progress(processed=index + 1)
         
         # Add the new row to the result DataFrame
-        print(f"Debug - Final new_row before adding to result_df: {new_row}")
+        # print(f"Debug - Final new_row before adding to result_df: {new_row}")
         result_df = pd.concat([result_df, pd.DataFrame([new_row])], ignore_index=True)
-        print(f"Debug - result_df after adding new row: {result_df.tail(1)}")
+        # print(f"Debug - result_df after adding new row: {result_df.tail(1)}")
 
     # Record end time and calculate duration
     end_time = datetime.now()

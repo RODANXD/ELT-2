@@ -2,6 +2,7 @@ import pandas as pd
 from typing import Dict, List
 from fuzzywuzzy import fuzz
 import logger
+from .schema_analyzer import _infer_currency_hints_from_headers, _infer_unit_hints_from_headers
 
 def get_next_incremental_id(df: pd.DataFrame, column_name: str):
     """Get next incremental ID for auto-increment columns"""
@@ -180,36 +181,33 @@ def relate_country_company(country: str, company: str, company_df: pd.DataFrame,
     return company_df
 
 def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform currency dimension so that only currencies present in the raw data
-    (e.g., from 'unit_price_currency' column) are included in the output,
-    with all details (CurrencyID, CurrencyCode, Symbol, CurrencyName) from the destination table.
-    """
-    # Try to find the relevant source column for currency
+    """Return only currencies present in the data. If no currency column, infer from headers."""
+    # Existing logic
     currency_col = None
     if isinstance(mapping, dict) and 'CurrencyID' in mapping and isinstance(mapping['CurrencyID'], dict):
         currency_col = mapping['CurrencyID'].get('source_column')
-    # Fallback: try to auto-detect common currency column names
+
     if not currency_col or currency_col not in source_df.columns:
         for col in source_df.columns:
             if col.lower() in ['unit_price_currency', 'currency', 'currency_code']:
                 currency_col = col
                 break
 
-    # Create empty dataframe with destination structure
     df = create_empty_dimension_structure(dest_df)
+    candidate_codes = set()
 
+    # from the explicit column (if any)
     if currency_col and currency_col in source_df.columns:
-        # Get unique currency codes from the raw data
-        unique_currencies = source_df[currency_col].dropna().astype(str).str.upper().unique()
-        # Filter the destination table for only those currencies
-        filtered = dest_df[dest_df['CurrencyCode'].astype(str).str.upper().isin(unique_currencies)].copy()
-        # Reset index and preserve dtypes
-        filtered = filtered.reset_index(drop=True)
+        cand = source_df[currency_col].dropna().astype(str).str.upper().str.strip().unique().tolist()
+        candidate_codes.update([c[:3] for c in cand])  # normalize to 3 letters if a longer string appears
+
+    # from headers (Paid_EUR, TotalPaidEUR, etc.)
+    candidate_codes.update(_infer_currency_hints_from_headers(list(source_df.columns)))
+
+    if candidate_codes:
+        mask = dest_df['CurrencyCode'].astype(str).str.upper().isin(candidate_codes)
+        filtered = dest_df[mask].copy().reset_index(drop=True)
         df = pd.concat([df, filtered], ignore_index=True)
-    else:
-        # If no mapping or no matching column, return empty or default (optional)
-        pass
 
     return df
 
@@ -247,35 +245,32 @@ def transform_emission_source_provider(mapping: dict, source_df: pd.DataFrame, d
     return result_df
 
 def transform_unit(mapping, source_df: pd.DataFrame, dest_df: pd.DataFrame, calc_method) -> pd.DataFrame:
-    """
-    Transform unit dimension so that only units present in the raw data
-    (e.g., from 'consumption_unit' column) are included in the output,
-    with all details (UnitID, UnitName, UnitType, etc.) from the destination table.
-    """
-    # Try to find the relevant source column for unit
+    """Return only units needed; infer from headers when no explicit Unit column exists."""
     unit_col = None
     if isinstance(mapping, dict) and 'UnitID' in mapping and isinstance(mapping['UnitID'], dict):
         unit_col = mapping['UnitID'].get('source_column')
-    # Fallback: try to auto-detect common unit column names
+
     if not unit_col or unit_col not in source_df.columns:
         for col in source_df.columns:
             if col.lower() in ['consumption_unit', 'unit', 'unitname']:
                 unit_col = col
                 break
 
-    # Create empty dataframe with destination structure
     df = create_empty_dimension_structure(dest_df)
+    candidate_units = set()
 
     if unit_col and unit_col in source_df.columns:
-        # Get unique unit names from the raw data
-        unique_units = source_df[unit_col].dropna().astype(str).unique()
-        # Filter the destination table for only those units
-        filtered = dest_df[dest_df['UnitName'].astype(str).isin(unique_units)].copy()
-        filtered = filtered.reset_index(drop=True)
+        cand = source_df[unit_col].dropna().astype(str).str.strip().unique().tolist()
+        candidate_units.update([c.lower() for c in cand])
+
+    # infer from headers (Consumption_kWh, EmissionFactor_..._per_m3, Volume (m3), etc.)
+    candidate_units.update(_infer_unit_hints_from_headers(list(source_df.columns)))
+
+    if candidate_units:
+        dest_lower = dest_df.assign(_key=dest_df['UnitName'].astype(str).str.lower())
+        mask = dest_lower['_key'].isin(candidate_units)
+        filtered = dest_lower[mask].drop(columns=['_key']).copy().reset_index(drop=True)
         df = pd.concat([df, filtered], ignore_index=True)
-    else:
-        # If no mapping or no matching column, return empty or default (optional)
-        pass
 
     return df
 

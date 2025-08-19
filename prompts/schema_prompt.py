@@ -1,24 +1,227 @@
-
 import pandas as pd
 import logging
+from typing import Dict, List, Any
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gpt_prompt")
 
-def build_prompt(source_columns, dest_schema, source_table_name,calc_method, activity_cat , activity_sub_cat):
+def analyze_source_columns(source_df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Build a GPT prompt for environmental ETL data mapping, specifically for expense-based consumption.
+    Analyze source columns to understand data patterns and provide context to AI
+    """
+    analysis = {
+        'column_patterns': {},
+        'data_samples': {},
+        'data_types': {},
+        'potential_mappings': {},
+        'column_statistics': {}
+    }
     
-    Parameters:
-    - source_columns: list of column names (strings) from the source sheet
-    - dest_schema: dict of table metadata:
-        - "columns": list of column names
-        - "datatypes": list of datatypes
-        - "primary_key": primary key string
-    - source_table_name: name of the source sheet/table
-    """
-    logger.info(f"Building prompt for source table: {source_table_name}")
+    for col in source_df.columns:
+        col_data = source_df[col].dropna()
+        if len(col_data) == 0:
+            continue
+            
+        # Store data type
+        analysis['data_types'][col] = str(col_data.dtype)
+        
+        # Store sample values (first 3 non-null values)
+        analysis['data_samples'][col] = col_data.head(3).tolist()
+        
+        # Basic statistics
+        if col_data.dtype in ['int64', 'float64']:
+            analysis['column_statistics'][col] = {
+                'min': float(col_data.min()),
+                'max': float(col_data.max()),
+                'mean': float(col_data.mean()),
+                'count': int(len(col_data))
+            }
+        else:
+            analysis['column_statistics'][col] = {
+                'unique_count': int(col_data.nunique()),
+                'most_common': str(col_data.mode().iloc[0]) if len(col_data.mode()) > 0 else 'N/A',
+                'count': int(len(col_data))
+            }
+        
+        # Identify potential patterns
+        col_lower = col.lower().strip()
+        patterns = []
+        
+        # Financial patterns
+        if any(term in col_lower for term in ['amount', 'cost', 'price', 'paid', 'expense', 'spend', 'total', 'value']):
+            patterns.append('financial')
+        
+        # Date patterns
+        if any(term in col_lower for term in ['date', 'time', 'year', 'month', 'day', 'period']):
+            patterns.append('temporal')
+        
+        # Location patterns
+        if any(term in col_lower for term in ['country', 'city', 'location', 'place', 'origin', 'destination', 'from', 'to']):
+            patterns.append('location')
+        
+        # Company/Organization patterns
+        if any(term in col_lower for term in ['company', 'organization', 'supplier', 'provider', 'vendor', 'unit', 'department']):
+            patterns.append('organization')
+        
+        # Energy/Consumption patterns
+        if any(term in col_lower for term in ['energy', 'fuel', 'electricity', 'gas', 'consumption', 'usage', 'quantity']):
+            patterns.append('consumption')
+        
+        # Currency patterns
+        if any(term in col_lower for term in ['currency', 'curr']):
+            patterns.append('currency')
+        
+        # Unit patterns
+        if any(term in col_lower for term in ['unit', 'measure', 'uom']):
+            patterns.append('unit')
+        
+        # Travel patterns
+        if any(term in col_lower for term in ['travel', 'trip', 'journey', 'flight', 'hotel', 'distance', 'miles', 'km']):
+            patterns.append('travel')
+        
+        # Check data patterns for additional clues
+        if col_data.dtype == 'object' and len(col_data) > 0:
+            sample_values = col_data.astype(str).str.upper().head(10).tolist()
+            
+            # Check for airport codes (3-letter codes)
+            if all(len(str(v).strip()) == 3 and str(v).isalpha() for v in sample_values[:3] if str(v) != 'nan'):
+                patterns.append('airport_code')
+            
+            # Check for currency codes
+            if all(len(str(v).strip()) == 3 and str(v).isalpha() for v in sample_values[:3] if str(v) != 'nan'):
+                common_currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'CNY', 'INR']
+                if any(curr in sample_values for curr in common_currencies):
+                    patterns.append('currency_code')
+        
+        analysis['column_patterns'][col] = patterns
+    
+    return analysis
 
+def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_sub_cat: str) -> str:
+    """
+    Build dynamic mapping rules based on calculation method and activity category
+    """
+    base_rules = """
+
+    INFERENCE RULES (Generalizability):
+- If no explicit currency column exists, infer currency from column NAMES that embed ISO codes (e.g., Paid_EUR, TotalPaidEUR, Amount-USD, Price_GBP).
+- If multiple currencies appear in different headers, choose the one associated with the chosen financial amount column; otherwise prefer the most frequent.
+- If no explicit unit column exists, infer unit from headers:
+  • Suffix tokens like Consumption_kWh, Distance_km map to UnitID (kWh/km).
+  • Expressions like EmissionFactor_kgCO2e_per_m3 imply the consumption unit is m3 (take token after 'per_').
+  • Bracketed units such as Volume (m3) or Energy (kWh) also indicate the unit.
+- Do not hard-code to a sample dataset; always analyze headers + sample values to adapt to new schemas.
+
+
+    INTELLIGENT MAPPING RULES:
+    
+    1. FINANCIAL MAPPING:
+       - Look for columns with patterns: amount, cost, price, paid, expense, spend, total, value
+       - Map to 'PaidAmount' for expense-based calculations
+       - Consider currency-related columns for CurrencyID mapping
+    
+    2. CONSUMPTION MAPPING:
+       - For consumption-based: Look for quantity, consumption, usage, distance, energy columns
+       - Map to 'ConsumptionAmount' with appropriate consumption_type
+    
+    3. TEMPORAL MAPPING:
+       - Look for date, time, year, month, day, period columns
+       - Map to DateKey with proper date transformation
+    
+    4. ORGANIZATIONAL MAPPING:
+       - Look for company, organization, supplier, provider, vendor, unit, department columns
+       - Map to appropriate organizational fields
+    
+    5. LOCATION MAPPING:
+       - Look for country, city, location, place, origin, destination columns
+       - Consider for geographic relationships
+    """
+    
+    # Add specific rules based on calculation method
+    if calc_method == 'Consumption-based':
+        consumption_rules = f"""
+    
+    CONSUMPTION-BASED SPECIFIC RULES:
+    - Primary focus: Find columns representing actual consumption/usage
+    - Consumption types to consider: {get_consumption_types(activity_cat, activity_sub_cat)}
+    - Look for quantity measurements, distances, energy usage, fuel consumption
+    """
+    else:
+        consumption_rules = """
+    
+    EXPENSE-BASED SPECIFIC RULES:
+    - Primary focus: Financial amounts and costs
+    - ConsumptionAmount should default to 1.0 or derive from financial data
+    - Focus on mapping PaidAmount accurately
+    """
+    
+    # Add activity-specific rules
+    activity_rules = get_activity_specific_rules(activity_cat, activity_sub_cat)
+    
+    return base_rules + consumption_rules + activity_rules
+
+def get_consumption_types(activity_cat: str, activity_sub_cat: str) -> str:
+    """
+    Get relevant consumption types based on activity category and subcategory
+    """
+    if activity_cat.lower() == 'business travel':
+        if 'air' in activity_sub_cat.lower():
+            return "Distance (for flights), Days (for accommodation)"
+        elif 'hotel' in activity_sub_cat.lower():
+            return "Days (for stays)"
+        elif 'car' in activity_sub_cat.lower() or 'vehicle' in activity_sub_cat.lower():
+            return "Distance (for mileage), Fuel (for fuel consumption)"
+    elif activity_cat.lower() == 'energy':
+        return "Energy (kWh, MWh), Electricity, Heating, Fuel"
+    
+    return "Distance, Energy, Fuel, Heating, Electricity, Days"
+
+def get_activity_specific_rules(activity_cat: str, activity_sub_cat: str) -> str:
+    """
+    Get specific mapping rules based on activity category and subcategory
+    """
+    rules = f"""
+    
+    ACTIVITY-SPECIFIC RULES FOR {activity_cat.upper()} - {activity_sub_cat.upper()}:
+    """
+    
+    if activity_cat.lower() == 'business travel' and 'air' in activity_sub_cat.lower():
+        rules += """
+    - Look for origin/departure airport columns (origin, departure, from, start_airport, dep_airport)
+    - Look for destination/arrival airport columns (destination, arrival, to, end_airport, arr_airport)
+    - Airport codes should be 3-letter IATA codes
+    - Distance calculation will be automatic between airports
+    - ConsumptionAmount: "Distance" type with airport-based calculation
+    """
+    elif activity_cat.lower() == 'business travel' and 'hotel' in activity_sub_cat.lower():
+        rules += """
+    - Look for duration/nights columns (nights, days, duration, stay_duration)
+    - ConsumptionAmount: "Days" type
+    - Look for accommodation-related costs
+    """
+    elif 'energy' in activity_cat.lower() or 'electricity' in activity_sub_cat.lower():
+        rules += """
+    - Look for energy consumption columns (kwh, mwh, energy_usage, consumption)
+    - Look for energy type columns (electricity, gas, renewable, grid)
+    - ConsumptionAmount: "Energy" or "Electricity" type
+    """
+    
+    return rules
+
+def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name: str, 
+                calc_method: str, activity_cat: str, activity_sub_cat: str, 
+                source_df: pd.DataFrame = None) -> str:
+    """
+    Build an enhanced, dynamic GPT prompt for environmental ETL data mapping
+    """
+    logger.info(f"Building enhanced prompt for source table: {source_table_name}")
+
+    # Analyze source data if provided
+    source_analysis = {}
+    if source_df is not None:
+        source_analysis = analyze_source_columns(source_df)
+    
     # Step 1: Build Destination Schema Description
     schema_lines = []
     for table, metadata in dest_schema.items():
@@ -39,171 +242,208 @@ def build_prompt(source_columns, dest_schema, source_table_name,calc_method, act
 
     schema_block = "\n\n".join(schema_lines)
 
-    # Step 2: Source Columns
-    source_cols_str = ", ".join(source_columns)
+    # Step 2: Enhanced Source Analysis
+    source_analysis_block = f"Source Columns: {', '.join(source_columns)}"
+    
+    if source_analysis:
+        source_analysis_block += "\n\nSOURCE DATA ANALYSIS:"
+        for col, patterns in source_analysis['column_patterns'].items():
+            samples = source_analysis['data_samples'].get(col, [])
+            data_type = source_analysis['data_types'].get(col, 'unknown')
+            stats = source_analysis['column_statistics'].get(col, {})
+            
+            source_analysis_block += f"""
+    Column: {col}
+    - Data Type: {data_type}
+    - Patterns: {', '.join(patterns) if patterns else 'generic'}
+    - Sample Values: {samples}
+    - Statistics: {stats}"""
 
-    # Step 3: Hardcoded PK & User Input Info
-    pk_note = """
-                      a) PK is autoincrement value so no mapping
+    # Step 3: Dynamic Mapping Rules
+    mapping_rules = build_enhanced_mapping_rules(calc_method, activity_cat, activity_sub_cat)
 
-                      add them in output like
-                      {
-                        "PK": {
-                          "source_column": "null",
-                          "transformation": auto incremental value,
-                          "relation": "null"
-                        },
-                      }
-                      """
-
-    user_input_note = """
-                      b) 4 direct user input from UI : (fixed input -> below fact column)
-                        companyID, countryID, activitycategoryID, activitysubcategoryID
-
-                      Note: above columns are fixed mapping, no need to map from src columns again
-
-                      add them in output like
-                      {
-                        "companyID": {
-                          "source_column": "user_input",
-                          "transformation": find company id from userinput,
-                          "relation": "<DimTable.PK->FactTable_FK>"
-                        },
-                      }
-                      """
-
-    mapping_note = """
-                    c) company, country, activitycategory, activitysubcategory these are mapped now
-                      for other fact columns try to map rest best suitable source column
-
-                    condition: we have 2 calculation types: consumption or expense based
-                    this time it is = {}
-
-                    
-                                        
-                   NOTE: Incase of other ids INTELLINGENT SEMANTIC MAPPING BASED ON BUSINESS UNDERSTANDING IS REQUIRED HERE
-                   for example  sourceproviderid can match to expenseaccountname  
-                                unit can match to unitid etc
-                  
-                    In both cases we have to direct map 'PaidAmount' 
-
-                    Incase of expense based example:
-                      "ConsumptionAmount": {{
-                          "source_column": "<TickectPrice> or null",
-                          "consumption_type": "Currency",
-                          "transformation": 'null',          
-                          "relation": "null"
-                      }}
-
-                    Incase of consumption based - fact column  'ConsumptionAmount' need to be mapped properly
-                    add type among these ['Distance','Energy','Fuel','Heating','Electricity','Days']'   
-                    Condition : here activity category = {} and activity sub category = {}
-                     
-
-                    example 1:
-                      "ConsumptionAmount": {{
-                          "source_column": "HotelStays/ null",
-                          "consumption_type": "Days",
-                          "transformation": '<logic if there is no  src column to find date `from` and `to`> ',          
-                          "relation": "null"
-                      }}
-                      example 2 :
-                       "ConsumptionAmount": {{
-                          "source_column": "MileageDistance",
-                          "consumption_type": "Distance",
-                          "transformation": '<logic - if there is no src column to find distance `departure column` and `arrival column`>',          
-                          "relation": "null"
-                      }}
-
-                  similarly understand and map energy , fuel , heating , electricity  
-                    """.format(calc_method , activity_cat , activity_sub_cat)
-
-    # Add air travel specific instructions
-    air_travel_note = ""
-    if calc_method == 'Consumption-based' and activity_cat.lower() == 'business travel' and activity_sub_cat.lower() == 'air travel':
-        air_travel_note = """
-                    
-                    SPECIAL CASE FOR AIR TRAVEL CONSUMPTION:
-                    Since this is air travel consumption-based calculation, the system will automatically 
-                    calculate distances between airports using origin and destination airport codes.
-                    
-                    For Air Travel ConsumptionAmount mapping:
-                    - If you find columns containing origin/departure airport codes and destination/arrival airport codes,
-                      map ConsumptionAmount as follows:
-                      
-                      "ConsumptionAmount": {{
-                          "source_column": "null",
-                          "consumption_type": "Distance", 
-                          "transformation": "calculate distance between origin and destination airports using IATA codes",
-                          "relation": "null"
-                      }}
-                    
-                    - The system will automatically detect columns with names like: 
-                      Origin, Departure, From (for origin airport)
-                      Destination, Arrival, To (for destination airport)
-                    
-                    - Airport codes should be IATA codes (e.g., CDG, HND, LHR, JFK)
-                    - Distance will be calculated in kilometers
-                    """
-
-    null_mapping_note = """
-                        d) if no matching mapping, map fact columns to null and all other values to null
-                        """
-
-    output_instruction = """
-                            Output Instructions:
-
-                            FE1_EmissionActivityData (EmissionActivityID, DateKey, CountryID, CompanyID, OrganizationalUnitID, ActivityCategoryID, ActivitySubcategoryID, ActivityEmissionSourceID, ActivityEmissionSourceProviderID, EmissionFactorID, PaidAmount, CurrencyID, ConsumptionAmount, UnitID, ScopeID)
-                            PK: EmissionActivityID
-
-                            output JSON should consist
-                            - PK should be incremental value
-                            - user input mappings
-                            - rest of the src columns mapped to fact column
-                            - columns with NULL mapping
-
-                            Return only the required JSON FACT SCHEMA, structured as follows:
-                            missing mapping columns should be populated with null
-
-                            ```json
-                            {
-                              "fact_column": {
-                                "source_column": "<mapped_column_from_source> or <null>",
-                                "transformation": <transformation required> or <null>,
-                                "relation": "<DimTable.PK->FactTable_FK> or <null>"
-                              }
-                            }
-
-
-                            """
-    # Step 4: Final Prompt
-    prompt = f"""System: You are an expert data-mapping assistant for environmental ETL. You will be given the destination schema and a source sheet. Your job is to output only the required JSON mapping between the source sheet and destination schema fields.
-
-
-    STEP 1
-    Understand and establish relationships between the following dimension tables, based on their primary keys (PK):
-
-    Destination Schema (Dimensions + Fact Table):
-    {schema_block}
-
-    STEP 2
-    Establish the same PK–FK relationship between dimension tables and the fact table FE1\_EmissionActivityData. Example:
-    FE1\_EmissionActivityData.DateKey → D\_Date.DateKey
-
-    STEP 3: Mapping
-
-    Source Sheet: {source_table_name}
-    Columns include:
-    Columns: {source_cols_str}
-
-    {pk_note}
-    {user_input_note}
-    {mapping_note}
-    {air_travel_note}
-    {null_mapping_note}
-    {output_instruction}
-
+    # Step 4: Enhanced Instructions
+    enhanced_instructions = f"""
+    ENHANCED MAPPING INSTRUCTIONS:
+    
+    You are an expert AI data mapper. Your task is to intelligently map source columns to destination schema fields based on:
+    1. Column name patterns and semantics
+    2. Data content analysis
+    3. Business context ({calc_method} calculation for {activity_cat} - {activity_sub_cat})
+    4. Data types and sample values
+    
+    MAPPING APPROACH:
+    1. Analyze each source column's name, data type, and sample values
+    2. Use semantic understanding to find the best destination field match
+    3. Apply business logic based on calculation method and activity type
+    4. Handle missing mappings gracefully with appropriate defaults
+    
+    CORE MAPPING REQUIREMENTS:
+    
+    a) PRIMARY KEY: Auto-increment (no source mapping needed)
+    {{
+        "EmissionActivityID": {{
+            "source_column": null,
+            "transformation": "auto_increment",
+            "relation": "primary_key"
+        }}
+    }}
+    
+    b) USER INPUT FIELDS (from UI - already handled):
+    {{
+        "CompanyID": {{
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input",
+            "relation": "D_Company.CompanyID->FE1_EmissionActivityData.CompanyID"
+        }},
+        "CountryID": {{
+            "source_column": "user_input", 
+            "transformation": "lookup_from_user_input",
+            "relation": "D_Country.CountryID->FE1_EmissionActivityData.CountryID"
+        }},
+        "ActivityCategoryID": {{
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input", 
+            "relation": "DE1_ActivityCategory.ActivityCategoryID->FE1_EmissionActivityData.ActivityCategoryID"
+        }},
+        "ActivitySubcategoryID": {{
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input",
+            "relation": "DE1_ActivitySubcategory.ActivitySubcategoryID->FE1_EmissionActivityData.ActivitySubcategoryID"
+        }}
+    }}
+    
+    c) INTELLIGENT SEMANTIC MAPPING:
+    For remaining fields, use intelligent pattern matching:
+    
+    - PaidAmount: Look for financial columns (amount, cost, price, paid, expense, total, value)
+    - ConsumptionAmount: Based on calculation method:
+      * Consumption-based: Look for quantity/usage columns, set appropriate consumption_type
+      * Expense-based: Default to financial amount or 1.0
+    - DateKey: Look for date/time columns
+    - CurrencyID: Look for currency code columns  
+    - UnitID: Look for unit/measure columns
+    - OrganizationalUnitID: Look for organization/department/unit columns
+    - ActivityEmissionSourceProviderID: Look for supplier/provider columns
+    
+    CONSUMPTION TYPE MAPPING (for Consumption-based only):
+    Current context: {calc_method} calculation for {activity_cat} - {activity_sub_cat}
+    {get_consumption_types(activity_cat, activity_sub_cat)}
+    
+    d) DEFAULT HANDLING:
+    If no suitable source column found, map to null and provide appropriate default logic:
+    {{
+        "field_name": {{
+            "source_column": null,
+            "transformation": "default_value_or_logic",
+            "relation": null
+        }}
+    }}
     """
-    logger.info("Prompt built successfully.")
-    logger.info(f"PROMPT:\n{prompt}")
+
+    # Step 5: Output format
+    output_format = """
+    OUTPUT FORMAT:
+    Return ONLY a valid JSON mapping for the FE1_EmissionActivityData table:
+    
+    {
+        "EmissionActivityID": {
+            "source_column": null,
+            "transformation": "auto_increment", 
+            "relation": "primary_key"
+        },
+        "DateKey": {
+            "source_column": "<best_matching_date_column_or_null>",
+            "transformation": "<transformation_logic_or_null>",
+            "relation": "D_Date.DateKey->FE1_EmissionActivityData.DateKey"
+        },
+        "CountryID": {
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input",
+            "relation": "D_Country.CountryID->FE1_EmissionActivityData.CountryID"
+        },
+        "CompanyID": {
+            "source_column": "user_input", 
+            "transformation": "lookup_from_user_input",
+            "relation": "D_Company.CompanyID->FE1_EmissionActivityData.CompanyID"
+        },
+        "OrganizationalUnitID": {
+            "source_column": "<best_matching_org_column_or_null>",
+            "transformation": "<transformation_logic_or_null>", 
+            "relation": "D_OrganizationalUnit.OrganizationalUnitID->FE1_EmissionActivityData.OrganizationalUnitID"
+        },
+        "ActivityCategoryID": {
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input",
+            "relation": "DE1_ActivityCategory.ActivityCategoryID->FE1_EmissionActivityData.ActivityCategoryID"
+        },
+        "ActivitySubcategoryID": {
+            "source_column": "user_input",
+            "transformation": "lookup_from_user_input", 
+            "relation": "DE1_ActivitySubcategory.ActivitySubcategoryID->FE1_EmissionActivityData.ActivitySubcategoryID"
+        },
+        "ActivityEmissionSourceID": {
+            "source_column": "<energy_type_column_or_null>",
+            "transformation": "<lookup_logic_or_auto_detect>",
+            "relation": "DE1_ActivityEmissionSource.ActivityEmissionSourceID->FE1_EmissionActivityData.ActivityEmissionSourceID"
+        },
+        "ActivityEmissionSourceProviderID": {
+            "source_column": "<provider_supplier_column_or_null>",
+            "transformation": "<lookup_or_create_logic>",
+            "relation": "DE1_ActivityEmissionSourceProvider.ActivityEmissionSourceProviderID->FE1_EmissionActivityData.ActivityEmissionSourceProviderID"
+        },
+        "EmissionFactorID": {
+            "source_column": "<emission_factor_column_or_null>",
+            "transformation": "generate_from_country_and_source",
+            "relation": null
+        },
+        "PaidAmount": {
+            "source_column": "<best_matching_amount_column_or_null>",
+            "transformation": "<conversion_logic_or_null>",
+            "relation": null
+        },
+        "CurrencyID": {
+            "source_column": "<currency_column_or_null>", 
+            "transformation": "<lookup_logic_or_default>",
+            "relation": "D_Currency.CurrencyID->FE1_EmissionActivityData.CurrencyID"
+        },
+        "ConsumptionAmount": {
+            "source_column": "<consumption_quantity_column_or_null>",
+            "consumption_type": "<Distance|Energy|Fuel|Heating|Electricity|Days|Currency>",
+            "transformation": "<calculation_logic_based_on_type>",
+            "relation": null
+        },
+        "UnitID": {
+            "source_column": "<unit_column_or_null>",
+            "transformation": "<unit_lookup_logic>", 
+            "relation": "DE1_Unit.UnitID->FE1_EmissionActivityData.UnitID"
+        },
+        "ScopeID": {
+            "source_column": "derived_from_activity_category",
+            "transformation": "lookup_from_activity_category",
+            "relation": "DE1_Scopes.ScopeID->FE1_EmissionActivityData.ScopeID" 
+        }
+    }
+    """
+
+    # Final prompt assembly
+    prompt = f"""System: You are an expert AI data mapping assistant for environmental ETL systems. You excel at understanding data semantics and creating intelligent mappings between diverse source schemas and standardized destination schemas.
+
+DESTINATION SCHEMA:
+{schema_block}
+
+SOURCE DATA INFORMATION:
+Table: {source_table_name}
+{source_analysis_block}
+
+{mapping_rules}
+
+{enhanced_instructions}
+
+{output_format}
+
+Remember: Be intelligent about semantic matching. Column names don't need to match exactly - use your understanding of the data meaning and business context to create the best possible mappings.
+"""
+
+    logger.info("Enhanced dynamic prompt built successfully")
     return prompt
