@@ -147,14 +147,21 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
        - If a source column name contains a unit (e.g., 'consumption_m3', 'EmissionFactor_kgCO2e_per_m3'), infer the unit (e.g., 'm3') and map to the correct UnitID in the destination schema.
        - If a source column contains energy type information (e.g., 'SupplyCategory', 'EnergyOrigin'), map its values to the canonical names in the destination schema using semantic/fuzzy matching.
        - For energy origin/type mapping, use these standard mappings:
-           * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar ppa
+           * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar PPA
            * Conventional Electricity: conventional, fossil, coal, gas fired, non-renewable, grid
-           * Biomass Electricity: biomass, organic, biofuel, waste
+           * Biomass Electricity: solar PPA, organic, biofuel, waste
            * Natural Gas: natural gas, lng, methane
-           * Biomass Heating: biomass heating, wood, pellet
+           * Biomass Heating: biogas, heating, wood, pellet
            * District Heating: district, district heating, central heating
        - Use the provided list of ActivityEmissionSourceName from the destination schema for mapping.
-
+       
+    ACTIVITY EMISSION SOURCE DESCRIPTIONS:
+         - Green Electricity: Renewable electricity (solar, wind, hydro, etc.)
+         - Conventional Electricity: Grid or fossil-based electricity
+         - Biomass Electricity: Organic material used for electricity production, often sourced from plants or waste.
+         - Biomass Heating: Organic material used for heating production, often sourced from plants or waste.
+         - District Heating: Centralized heating systems.
+         - Natural Gas: Methane-based fuel, piped or liquefied.
     """
     
     # Add specific rules based on calculation method
@@ -222,14 +229,14 @@ def get_activity_specific_rules(activity_cat: str, activity_sub_cat: str) -> str
     elif 'energy' in activity_cat.lower() or 'electricity' in activity_sub_cat.lower():
         rules += """
     - Look for energy consumption columns (kwh, mwh, energy_usage, consumption)
-    - Look for energy type columns (electricity, gas, renewable, grid, energy_origin, energyorigin, energy_type, supply, supplycategory)
+    - Look for energy type columns (electricity, gas, renewable, grid, energy_origin, energyorigin, energy_type, supply, supplycategory, SupplyCategory, HeatSource, EnergySource,)
     - ConsumptionAmount: "Energy" or "Electricity" type
     - For energy origin/type mapping, use these standard mappings:
-        * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar ppa
+        * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar PPA
         * Conventional Electricity: conventional, fossil, coal, gas fired, non-renewable, grid
-        * Biomass Electricity: biomass, organic, biofuel, waste
+        * Biomass Electricity: solar PPA, organic, biofuel, waste
         * Natural Gas: natural gas, lng, methane
-        * Biomass Heating: biomass heating, wood, pellet
+        * Biomass Heating: biogas, heating, wood, pellet
         * District Heating: district, district heating, central heating
     - Map source energy type values to destination ActivityEmissionSourceName using semantic matching
     """
@@ -292,6 +299,8 @@ def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name
     # Step 4: Enhanced Instructions
     enhanced_instructions = f"""
     ENHANCED MAPPING INSTRUCTIONS:
+    
+    IMPORTANT: You must analyze both column names and the actual data values in each column. If a column name is ambiguous, use the sample values to infer the correct mapping. For example, if a column contains values like 'biogas', 'district', or 'gas', map these to the appropriate energy source type in the destination schema, even if the column name is not descriptive.
     
     You are an expert AI data mapper. Your task is to intelligently map source columns to destination schema fields based on:
     1. Column name patterns and semantics
@@ -416,7 +425,7 @@ def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name
                 "green": "Green Electricity",
                 "renewable": "Green Electricity",
                 "solar": "Green Electricity",
-                "solar ppa": "Green Electricity",
+                "solar PPA": "Green Electricity",
                 "wind": "Green Electricity",
                 "hydro": "Green Electricity",
                 "clean": "Green Electricity",
@@ -426,10 +435,21 @@ def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name
                 "gas fired": "Conventional Electricity",
                 "non-renewable": "Conventional Electricity",
                 "grid": "Conventional Electricity",
-                "biomass": "Biomass Electricity",
+                
                 "organic": "Biomass Electricity",
                 "biofuel": "Biomass Electricity",
-                "waste": "Biomass Electricity"
+                "waste": "Biomass Electricity",
+                "biogas": "Biomass Heating",
+                "heating": "Biomass Heating",
+                "wood": "Biomass Heating",
+                "pellet": "Biomass Heating",
+                "district": "District Heating",
+                "district heating": "District Heating",
+                "central heating": "District Heating",
+                "natural gas": "Natural Gas",
+                "lng": "Natural Gas",
+                "methane": "Natural Gas"
+                
             },
             "relation": "DE1_ActivityEmissionSource.ActivityEmissionSourceID->FE1_EmissionActivityData.ActivityEmissionSourceID"
         },

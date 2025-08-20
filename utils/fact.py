@@ -13,6 +13,30 @@ from .mapping_utils import normalize_text, fuzzy_match_value_to_list, normalize_
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
+def safe_int_conversion(value):
+    """
+    Safely convert a value to integer, handling NaN and None values.
+    Returns None if conversion is not possible.
+    """
+    if pd.isna(value) or value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+def safe_float_conversion(value):
+    """
+    Safely convert a value to float, handling NaN and None values.
+    Returns None if conversion is not possible.
+    """
+    if pd.isna(value) or value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
 def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_emission_source_df, country_df, country, calc_method):
     """Returns ActivityEmissionSourceID, UnitID, and EmissionFactorID based on mapping conditions."""
     
@@ -286,13 +310,14 @@ def generate_fact(
         # Map the fixed fact columns with proper data types
         new_row['EmissionActivityID'] = int(get_next_incremental_id(result_df, 'EmissionActivityID'))
         
-        # Get IDs and ensure they are integers
+        # Get IDs and ensure they are integers with proper NaN handling
         company_id = lookup_value(company_df, 'CompanyName', company, 'CompanyID')
         new_row['CompanyID'] = int(company_id) if company_id is not None else None
+        
         # Handle OrganizationalUnitID
         # ----------------------------------------------------------
-# OrganisationalUnitID assignment
-# ----------------------------------------------------------
+        # OrganisationalUnitID assignment
+        # ----------------------------------------------------------
         if is_multiple_units and unit_column and unit_column in source_df.columns:
             unit_name = source_row.get(unit_column)
             if unit_name and not org_unit_df.empty:
@@ -321,7 +346,8 @@ def generate_fact(
         activity_subcat_id = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
         new_row['ActivitySubcategoryID'] = int(activity_subcat_id) if activity_subcat_id is not None else None
         
-        new_row['OrganizationalUnitID'] = int(org_unit_df.loc[0, 'OrganizationalUnitID']) if not org_unit_df.empty else None
+        # Remove duplicate assignment
+        # new_row['OrganizationalUnitID'] = int(org_unit_df.loc[0, 'OrganizationalUnitID']) if not org_unit_df.empty else None
         
         
         scope_id = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ScopeID')
@@ -331,7 +357,7 @@ def generate_fact(
         # --- Resolve ActivityEmissionSourceID & ActivitySubcategoryID from source energy type ---
         # Detect energy type column robustly
         energy_col = None
-        # broaden detection to many possible energy/ source columns
+                    # broaden detection to many possible energy/ source columns
         energy_candidates = ['energy', 'energy origin', 'energyorigin', 'supply', 'supplycategory', 'EnergyOrigin', 'subcategory', 'fuel', 'source', 'energy_type', 'activityemissionsourcename']
         for col in source_df.columns:
             if not isinstance(col, str):
@@ -352,11 +378,10 @@ def generate_fact(
             # Green electricity mappings
             'green': 'Green Electricity',
             'renewable': 'Green Electricity',
-            'solar': 'Green Electricity',  # Keep solar as Green Electricity
+            'solar': 'Green Electricity',
             'wind': 'Green Electricity',
             'hydro': 'Green Electricity',
             'clean': 'Green Electricity',
-            
             # Conventional electricity mappings
             'conventional': 'Conventional Electricity',
             'fossil': 'Conventional Electricity',
@@ -364,96 +389,101 @@ def generate_fact(
             'gas fired': 'Conventional Electricity',
             'non-renewable': 'Conventional Electricity',
             'grid': 'Conventional Electricity',
-            
             # Biomass electricity mappings
-            'biomass': 'Biomass Electricity',
             'organic': 'Biomass Electricity',
             'biofuel': 'Biomass Electricity',
             'waste': 'Biomass Electricity',
-            'solar ppa': 'Biomass Electricity',  # Map solar PPA to Biomass Electricity as requested
-            
+            'bioelectricity': 'Biomass Electricity',
+            'waste-to-energy': 'Biomass Electricity',
+            # Biomass heating mappings
+            'biogas': 'Biomass Heating',  # <-- Fix: biogas should map to Biomass Heating
+            'heating': 'Biomass Heating',
+            'wood': 'Biomass Heating',
+            'pellet': 'Biomass Heating',
+            'bio gas': 'Biomass Heating',  # <-- Fix: was missing 'Bio'
+            'biomass heating': 'Biomass Heating',
+            # District heating mappings
+            'district': 'District Heating',
+            'district heating': 'District Heating',
+            'central heating': 'District Heating',
             # Natural gas mappings
             'natural gas': 'Natural Gas',
             'lng': 'Natural Gas',
             'methane': 'Natural Gas',
-            
-            # Biomass heating mappings
-            'biomass heating': 'Biomass Heating',
-            'wood': 'Biomass Heating',
-            'pellet': 'Biomass Heating',
-            
-            # District heating mappings
-            'district': 'District Heating',
-            'district heating': 'District Heating',
-            'central heating': 'District Heating'
         }
 
-        if energy_col and energy_col in source_row:
-            raw_energy = source_row.get(energy_col)
-            if pd.notna(raw_energy):
-                # First try direct mapping using our predefined mappings
-                raw_energy_normalized = str(raw_energy).strip().lower()
-                
-                # Log the energy type for debugging
-                logging.info(f"Processing energy type: '{raw_energy_normalized}'")
-                
-                # Check if we have a direct mapping for this energy type - first try exact match
-                mapped_energy_type = None
-                # First try exact match
-                if raw_energy_normalized in energy_type_mappings:
-                    mapped_energy_type = energy_type_mappings[raw_energy_normalized]
-                    logging.info(f"Mapped '{raw_energy_normalized}' to '{mapped_energy_type}' using exact match")
-                # Then try substring match
-                else:
-                    for source_type, dest_type in energy_type_mappings.items():
-                        if source_type in raw_energy_normalized:
-                            mapped_energy_type = dest_type
-                            logging.info(f"Mapped '{raw_energy_normalized}' to '{mapped_energy_type}' using substring match")
-                            break
-                
-                # If we found a mapping, look up the corresponding ID
-                if mapped_energy_type:
-                    row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'] == mapped_energy_type]
+        # --- VALUE-BASED ENERGY TYPE DETECTION (NEW) ---
+        # Instead of relying only on column names, scan all columns for known energy type values
+        value_based_energy_type = None
+        value_based_col = None
+        value_based_val = None
+        
+        # Only do value-based detection if we haven't already resolved the energy type
+        if resolved_emission_source_id is None:
+            for col in source_row.index:
+                val = source_row[col]
+                if pd.isna(val) or val is None:
+                    continue
+                val_str = str(val).strip().lower()
+                for pattern, canonical in energy_type_mappings.items():
+                    if pattern in val_str:
+                        value_based_energy_type = canonical
+                        value_based_col = col
+                        value_based_val = val_str
+                        break
+                if value_based_energy_type:
+                    break
+            
+            # If found via value-based detection, override the previous mapping logic
+            if value_based_energy_type:
+                mapped_energy_type = value_based_energy_type
+                logging.info(f"Value-based energy type detected: '{value_based_energy_type}' from column '{value_based_col}' and value '{value_based_val}'")
+                # Lookup the corresponding ID
+                row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'] == mapped_energy_type]
+                if not row.empty:
+                    resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
+                    if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
+                        resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
+                    logging.info(f"Found ID {resolved_emission_source_id} for '{mapped_energy_type}' (value-based)")
+        # --- END VALUE-BASED ENERGY TYPE DETECTION ---
+
+        # If no direct mapping found, try fuzzy matching to ActivityEmissionSourceName
+        if resolved_emission_source_id is None:
+            # Use raw_energy if available, otherwise skip fuzzy matching
+            if 'raw_energy' in locals() and raw_energy is not None:
+                candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+                mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
+                if mapped:
+                    row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
                     if not row.empty:
                         resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
                         if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
                             resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
-                        logging.info(f"Found ID {resolved_emission_source_id} for '{mapped_energy_type}'")
-                
-                # If no direct mapping found, try fuzzy matching to ActivityEmissionSourceName
-                if resolved_emission_source_id is None:
-                    candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
-                    mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
-                    if mapped:
-                        row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
-                        if not row.empty:
-                            resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
-                            if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
-                                resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
-                            logging.info(f"Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
-                    else:
-                        # fallback: try normalize and direct match
-                        key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
-                        key = " ".join(key.split())
-                        aes_df_norm = activity_emission_source_df.copy()
-                        aes_df_norm['_norm'] = (
-                            aes_df_norm['ActivityEmissionSourceName'].astype(str)
-                            .str.lower().str.replace('_', ' ', regex=False)
-                            .str.replace('-', ' ', regex=False)
-                            .str.replace(r'\s+', ' ', regex=True).str.strip()
-                        )
+                        logging.info(f"Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
+                else:
+                    # fallback: try normalize and direct match
+                    key = str(raw_energy).strip().lower().replace('_', ' ', regex=False).replace('-', ' ', regex=False)
+                    key = " ".join(key.split())
+                    aes_df_norm = activity_emission_source_df.copy()
+                    aes_df_norm['_norm'] = (
+                        aes_df_norm['ActivityEmissionSourceName'].astype(str)
+                        .str.lower().str.replace('_', ' ', regex=False)
+                        .str.replace('-', ' ', regex=False)
+                        .str.replace(r'\s+', ' ', regex=True).str.strip()
+                    )
 
-                        match = aes_df_norm[aes_df_norm['_norm'] == key]
-                        if not match.empty:
-                            resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
-                            if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
-                                resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
-                            logging.info(f"Direct matched normalized '{key}' to ID {resolved_emission_source_id}")
+                    match = aes_df_norm[aes_df_norm['_norm'] == key]
+                    if not match.empty:
+                        resolved_emission_source_id = int(match['ActivityEmissionSourceID'].iloc[0])
+                        if 'ActivitySubcategoryID' in match.columns and not pd.isna(match['ActivitySubcategoryID'].iloc[0]):
+                            resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
+                        logging.info(f"Direct matched normalized '{key}' to ID {resolved_emission_source_id}")
                 
                 # If we still couldn't find a match, log a warning
                 if resolved_emission_source_id is None:
                     logging.warning(f"Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
-                    # st.warning(f"⚠️ Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName. Using default if available.")
+            else:
+                logging.warning(f"Could not map energy type to any ActivityEmissionSourceName (no raw_energy available)")
 
 
         # Assign resolved IDs
@@ -498,9 +528,10 @@ def generate_fact(
         
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
         
-        # Handle EmissionFactorID
+        # Handle EmissionFactorID - Use pre-generated value if available, otherwise generate new one
         if emission_factor_id is not None:
             new_row['EmissionFactorID'] = emission_factor_id
+            logging.info(f"Using pre-generated EmissionFactorID: {emission_factor_id}")
         else:
             # Generate EmissionFactorID based on country ISO2Code and ActivityEmissionSourceName
             country_iso2 = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
@@ -517,9 +548,9 @@ def generate_fact(
             if country_iso2 and emission_source_name:
                 # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
                 new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
-                logging.info(f"Generated EmissionFactorID: {new_row['EmissionFactorID']}")
+                logging.info(f"Generated new EmissionFactorID: {new_row['EmissionFactorID']}")
             else:
-                new_row['EmissionFactorID'] = None
+                new_row['EmissionFactorID'] = "Unknown_EmissionFactor"
                 if not country_iso2:
                     logging.warning(f"Missing country_iso2 for EmissionFactorID generation")
                 if not emission_source_name:
@@ -551,16 +582,20 @@ def generate_fact(
                     if origin_column and destination_column:
                         origin_code = source_row.get(origin_column)
                         dest_code = source_row.get(destination_column)
-                        distance = calculate_airport_distance(origin_code, dest_code)
-                        if distance:
-                            logging.info(f"Calculated air travel distance: {origin_code} -> {dest_code} = {distance} km")
+                        # Handle NaN values in origin/destination codes
+                        if pd.isna(origin_code) or pd.isna(dest_code):
+                            distance = None
+                        else:
+                            distance = calculate_airport_distance(origin_code, dest_code)
+                            if distance:
+                                logging.info(f"Calculated air travel distance: {origin_code} -> {dest_code} = {distance} km")
                     
                     # Method 2: Try to find airport codes in any available source columns
                     if not distance:
                         airport_codes = []
                         for col in source_df.columns:
                             value = source_row.get(col)
-                            if value and isinstance(value, str) and len(value.strip()) == 3:
+                            if value and not pd.isna(value) and isinstance(value, str) and len(value.strip()) == 3:
                                 code = value.strip().upper()
                                 # Check if this looks like an airport code (exists in our database)
                                 from .airport_distance import get_airport_coordinates
@@ -580,7 +615,10 @@ def generate_fact(
                         logging.warning(f"Could not calculate distance for air travel - no valid airport codes found")
                 elif source_column and source_column in source_df.columns:
                     value = source_row[source_column]
-                    new_row[field_name] = float(value) if value is not None else None
+                    # Use safe float conversion function
+                    new_row[field_name] = safe_float_conversion(value)
+                    if new_row[field_name] is None:
+                        logging.warning(f"Could not convert ConsumptionAmount value '{value}' to float")
                 else:
                     # Default value if no mapping exists
                     new_row[field_name] = 1.0  # Default consumption amount
@@ -589,7 +627,10 @@ def generate_fact(
             elif field_name == 'PaidAmount':
                 if source_column and source_column in source_df.columns:
                     value = source_row[source_column]
-                    new_row[field_name] = float(value) if value is not None else None
+                    # Use safe float conversion function
+                    new_row[field_name] = safe_float_conversion(value)
+                    if new_row[field_name] is None:
+                        logging.warning(f"Could not convert PaidAmount value '{value}' to float")
                 else:
                     # Default value if no mapping exists
                     new_row[field_name] = 0.0  # Default paid amount
@@ -599,43 +640,47 @@ def generate_fact(
             if field_name == 'ActivityEmissionSourceProviderID':
                 if source_column and source_column in source_df.columns:
                     provider_name = source_row[source_column]
-                    # First try to find in the activity_emmission_source_provider_df
-                    provider_id = lookup_value(activity_emmission_source_provider_df, 
-                                             'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
-                    
-                    if provider_id is not None:
-                        new_row[field_name] = int(provider_id)
+                    # Handle NaN values in provider name
+                    if pd.isna(provider_name) or provider_name is None:
+                        new_row[field_name] = None
                     else:
-                        # If not found in the activity_emmission_source_provider_df, check if it exists in the destination tables
-                        if dest_tables and 'DE1_ActivityEmissionSourceProvi' in dest_tables:
-                            provider_df = dest_tables['DE1_ActivityEmissionSourceProvi']
-                            provider_row = provider_df[provider_df['ProviderName'].str.lower() == provider_name.lower() if provider_name else False]
-                            if not provider_row.empty:
-                                new_row[field_name] = int(provider_row['ActivityEmissionSourceProviderID'].iloc[0])
-                            else:
-                                # If not found in destination tables, create a new provider entry
-                                if not provider_df.empty:
-                                    new_provider_id = provider_df['ActivityEmissionSourceProviderID'].max() + 1
-                                else:
-                                    new_provider_id = 1
-                                
-                                # Add to activity_emmission_source_provider_df for future lookups
-                                new_provider = pd.DataFrame({
-                                    'ActivityEmissionSourceProviderID': [new_provider_id],
-                                    'ProviderName': [provider_name]
-                                })
-                                activity_emmission_source_provider_df = pd.concat([activity_emmission_source_provider_df, new_provider], ignore_index=True)
-                                
-                                new_row[field_name] = int(new_provider_id)
+                        # First try to find in the activity_emmission_source_provider_df
+                        provider_id = lookup_value(activity_emmission_source_provider_df, 
+                                                 'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
+                        
+                        if provider_id is not None:
+                            new_row[field_name] = safe_int_conversion(provider_id)
                         else:
-                            new_row[field_name] = None  # No destination tables provided
+                            # If not found in the activity_emmission_source_provider_df, check if it exists in the destination tables
+                            if dest_tables and 'DE1_ActivityEmissionSourceProvi' in dest_tables:
+                                provider_df = dest_tables['DE1_ActivityEmissionSourceProvi']
+                                provider_row = provider_df[provider_df['ProviderName'].str.lower() == provider_name.lower() if provider_name else False]
+                                if not provider_row.empty:
+                                    new_row[field_name] = safe_int_conversion(provider_row['ActivityEmissionSourceProviderID'].iloc[0])
+                                else:
+                                    # If not found in destination tables, create a new provider entry
+                                    if not provider_df.empty:
+                                        new_provider_id = provider_df['ActivityEmissionSourceProviderID'].max() + 1
+                                    else:
+                                        new_provider_id = 1
+                                    
+                                    # Add to activity_emmission_source_provider_df for future lookups
+                                    new_provider = pd.DataFrame({
+                                        'ActivityEmissionSourceProviderID': [new_provider_id],
+                                        'ProviderName': [provider_name]
+                                    })
+                                    activity_emmission_source_provider_df = pd.concat([activity_emmission_source_provider_df, new_provider], ignore_index=True)
+                                    
+                                    new_row[field_name] = safe_int_conversion(new_provider_id)
+                            else:
+                                new_row[field_name] = None  # No destination tables provided
                 else:
                     # If no mapping exists, try to find a default provider
                     if not activity_emmission_source_provider_df.empty:
-                        new_row[field_name] = int(activity_emmission_source_provider_df['ActivityEmissionSourceProviderID'].iloc[0])
+                        new_row[field_name] = safe_int_conversion(activity_emmission_source_provider_df['ActivityEmissionSourceProviderID'].iloc[0])
                     elif dest_tables and 'DE1_ActivityEmissionSourceProvi' in dest_tables and not dest_tables['DE1_ActivityEmissionSourceProvi'].empty:
                         # Use the first provider from destination tables
-                        new_row[field_name] = int(dest_tables['DE1_ActivityEmissionSourceProvi']['ActivityEmissionSourceProviderID'].iloc[0])
+                        new_row[field_name] = safe_int_conversion(dest_tables['DE1_ActivityEmissionSourceProvi']['ActivityEmissionSourceProviderID'].iloc[0])
                     else:
                         new_row[field_name] = None  # No providers available
             
@@ -648,65 +693,24 @@ def generate_fact(
                             
                         
                     
-            # Handle EmissionFactorID
-            if field_name == 'EmissionFactorID':
-                # Check if we have a direct mapping for EmissionFactorID
-                if source_column and source_column in source_df.columns:
-                    emission_factor_id = source_row[source_column]
-                    new_row[field_name] = emission_factor_id
-                else:
-                    # Generate EmissionFactorID based on country ISO2Code and ActivityEmissionSourceName
-                    # Get the country ISO2Code
-                    country_id = new_row.get('CountryID')
-                    if country_id and not pd.isna(country_id) and not country_df.empty:
-                        country_iso2code = lookup_value(country_df, 'CountryID', country_id, 'ISO2Code')
-                        
-                        # Get the ActivityEmissionSourceName
-                        activity_emission_source_id = new_row.get('ActivityEmissionSourceID')
-                        if activity_emission_source_id and not pd.isna(activity_emission_source_id) and not activity_emission_source_df.empty:
-                            activity_subcategory_id = new_row.get('ActivitySubcategoryID')
-                            
-                            # Filter for Green Electricity (ActivitySubcategoryID = 21)
-                            if field_name == 'EmissionFactorID':
-    # Check if we have a direct mapping
-                                if source_column and source_column in source_df.columns:
-                                    emission_factor_id = source_row[source_column]
-                                    new_row[field_name] = emission_factor_id
-                                else:
-                                    # Generate EmissionFactorID dynamically from ISO2Code + ActivityEmissionSourceName
-                                    country_id = new_row.get('CountryID')
-                                    activity_emission_source_id = new_row.get('ActivityEmissionSourceID')
-                            
-                                    country_iso2code = None
-                                    if country_id and not pd.isna(country_id) and not country_df.empty:
-                                        country_iso2code = lookup_value(country_df, 'CountryID', country_id, 'ISO2Code')
-                            
-                                    emission_source_name = None
-                                    if activity_emission_source_id and not pd.isna(activity_emission_source_id) and not activity_emission_source_df.empty:
-                                        row = activity_emission_source_df[
-                                            activity_emission_source_df['ActivityEmissionSourceID'] == activity_emission_source_id
-                                        ]
-                                        if not row.empty:
-                                            emission_source_name = row.iloc[0]['ActivityEmissionSourceName']
-                            
-                                    if country_iso2code and emission_source_name:
-                                        new_row[field_name] = f"{country_iso2code}_{emission_source_name.replace(' ', '_')}"
-                                    else:
-                                        new_row[field_name] = "Unknown_EmissionFactor"
-                        else:
-                            new_row[field_name] = "Unknown_EmissionFactor"
-                    else:
-                        new_row[field_name] = "Unknown_EmissionFactor"
+            # Handle EmissionFactorID - This is now handled above in the main logic
+            # No need to duplicate the logic here
             
             if field_name == 'CurrencyID':
                 if source_column and source_column in source_df.columns:
                     currency_code = source_row[source_column]
-                    currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
-                    new_row[field_name] = int(currency_id) if currency_id is not None else None
+                    # Handle NaN values in currency code
+                    if pd.isna(currency_code) or currency_code is None:
+                        new_row[field_name] = None
+                    else:
+                        currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                        new_row[field_name] = safe_int_conversion(currency_id)
                 else:
                     # If no mapping exists, try to find a default currency
                     if not currency_df.empty:
-                        new_row[field_name] = int(currency_df['CurrencyID'].iloc[0])
+                        new_row[field_name] = safe_int_conversion(currency_df['CurrencyID'].iloc[0])
+                    else:
+                        new_row[field_name] = None
         
         # Update progress
         progress = (index + 1) / total_records

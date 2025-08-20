@@ -63,11 +63,11 @@ def test_energy_mapping():
             'grid': 'Conventional Electricity',
             
             # Biomass electricity mappings
-            'biomass': 'Biomass Electricity',
+            # 'biomass': 'Biomass Electricity',
             'organic': 'Biomass Electricity',
             'biofuel': 'Biomass Electricity',
             'waste': 'Biomass Electricity',
-            'solar ppa': 'Biomass Electricity'  # Map solar PPA to Biomass Electricity as requested
+            'solar PPA': 'Biomass Electricity'  # Map solar PPA to Biomass Electricity as requested
         }
         
         # Check if we have a direct mapping for this energy type
