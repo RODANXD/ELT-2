@@ -3,7 +3,8 @@ from typing import Dict, List
 from fuzzywuzzy import fuzz
 import logger
 from .schema_analyzer import _infer_currency_hints_from_headers, _infer_unit_hints_from_headers
-
+from .mapping_utils import extract_unit_from_column, normalize_unit
+import re 
 def get_next_incremental_id(df: pd.DataFrame, column_name: str):
     """Get next incremental ID for auto-increment columns"""
     if df.empty:
@@ -123,7 +124,14 @@ def transform_D_Date(mapping, source_df, ReportingYear) -> pd.DataFrame:
 
     if has_date_mapping:
         # Get the date column and convert to datetime
-        date_col = pd.to_datetime(source_df[mapping['DateKey']['source_column']], errors='coerce')
+        raw = source_df[mapping['DateKey']['source_column']].astype(str).str.strip()
+
+        # 1st attempt: ISO-like YYYY/MM/DD
+        date_col = pd.to_datetime(raw, errors='coerce', dayfirst=False)
+
+        # 2nd attempt: European DD/MM/YYYY if still NaT
+        mask = date_col.isna()
+        date_col.loc[mask] = pd.to_datetime(raw.loc[mask], errors='coerce', dayfirst=True)
         
         # Calculate quarter start dates (first day of the quarter)
         quarter_start = date_col.dt.to_period('Q').dt.start_time
@@ -201,20 +209,68 @@ def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFr
         cand = source_df[currency_col].dropna().astype(str).str.upper().str.strip().unique().tolist()
         candidate_codes.update([c[:3] for c in cand])  # normalize to 3 letters if a longer string appears
 
-    # from headers (Paid_EUR, TotalPaidEUR, etc.) - Enhanced with new extraction function
+    # from headers (Paid_EUR, TotalPaidEUR, TotalPaid(EUR), etc.) - Enhanced with new extraction function
     from .mapping_utils import extract_currency_from_column
     for col in source_df.columns:
         extracted_currency = extract_currency_from_column(col)
         if extracted_currency:
             candidate_codes.add(extracted_currency)
+            print(f"transform_D_Currency: extracted currency '{extracted_currency}' from column header '{col}'")
+
+    # If still empty, scan sample values in the source data for currency tokens like 'EUR'
+    if not candidate_codes:
+        try:
+            import re
+            iso_pattern = re.compile(r'\b([A-Z]{3})\b')
+            sample_vals = []
+            for col in source_df.columns:
+                try:
+                    vals = source_df[col].dropna().astype(str).head(50).tolist()
+                    sample_vals.extend(vals)
+                except Exception:
+                    continue
+            for v in sample_vals:
+                m = iso_pattern.search(v)
+                if m:
+                    candidate_codes.add(m.group(1).upper())
+            if candidate_codes:
+                print(f"transform_D_Currency: inferred currency codes from data values: {candidate_codes}")
+        except Exception:
+            pass
     
     # Also keep the old header inference as fallback
     candidate_codes.update(_infer_currency_hints_from_headers(list(source_df.columns)))
 
+    print(f"transform_D_Currency: candidate_codes={candidate_codes}")
+    try:
+        print(f"transform_D_Currency: dest_df columns={list(dest_df.columns)}; sample={dest_df.head(6).to_dict(orient='list')}")
+    except Exception:
+        pass
+
+    # Find currency code column in destination table (support variations)
+    currency_code_col = None
+    try:
+        norm_map = {re.sub(r'[^a-z0-9]', '', c.lower()): c for c in dest_df.columns}
+        for key, orig in norm_map.items():
+            if key in ('currencycode', 'currency_code', 'currency', 'code'):
+                currency_code_col = orig
+                break
+        if currency_code_col is None and 'CurrencyCode' in dest_df.columns:
+            currency_code_col = 'CurrencyCode'
+    except Exception:
+        currency_code_col = 'CurrencyCode' if 'CurrencyCode' in dest_df.columns else None
+
+    if currency_code_col is None:
+        print(f"transform_D_Currency: destination currency column not found in {list(dest_df.columns)}")
+        return df
+
     if candidate_codes:
-        mask = dest_df['CurrencyCode'].astype(str).str.upper().isin(candidate_codes)
+        mask = dest_df[currency_code_col].astype(str).str.upper().isin(candidate_codes)
+        print(f"transform_D_Currency: using dest column '{currency_code_col}' to match candidate codes; mask sum={mask.sum()} out of {len(dest_df)} rows")
         filtered = dest_df[mask].copy().reset_index(drop=True)
         df = pd.concat([df, filtered], ignore_index=True)
+    else:
+        print("transform_D_Currency: No candidate currency codes found; returning empty currency df")
 
     return df
 
@@ -263,6 +319,14 @@ def transform_unit(mapping, source_df: pd.DataFrame, dest_df: pd.DataFrame, calc
                 unit_col = col
                 break
 
+    import logging
+    # Visible debug prints to ensure output appears in user logs
+    print(f"transform_unit: dest_df columns={list(dest_df.columns)} empty={dest_df.empty}")
+    try:
+        print(f"transform_unit: dest_df sample: {dest_df.head(3).to_dict(orient='list')}")
+    except Exception:
+        pass
+
     df = create_empty_dimension_structure(dest_df)
     candidate_units = set()
 
@@ -273,11 +337,58 @@ def transform_unit(mapping, source_df: pd.DataFrame, dest_df: pd.DataFrame, calc
     # infer from headers (Consumption_kWh, EmissionFactor_..._per_m3, Volume (m3), etc.)
     candidate_units.update(_infer_unit_hints_from_headers(list(source_df.columns)))
 
+    # Also use the improved extractor to parse units from complex column names (e.g., 'kWh_Used' -> 'kWh')
+    for col in source_df.columns:
+        try:
+            ext = extract_unit_from_column(col)
+            if ext:
+                candidate_units.add(str(ext).lower())
+        except Exception:
+            # ignore extractor failures per-column
+            pass
+
+    # Debug: show inferred candidate units (small sample)
+    try:
+        import logging
+        logging.info(f"Detected candidate units from headers/columns: {list(candidate_units)[:10]}")
+    except Exception:
+        pass
+
     if candidate_units:
-        dest_lower = dest_df.assign(_key=dest_df['UnitName'].astype(str).str.lower())
+        # Try to find the unit name column in destination table (support variations)
+        # Normalize destination column names by removing non-alphanumerics for robust matching
+        norm_map = {re.sub(r'[^a-z0-9]', '', c.lower()): c for c in dest_df.columns}
+        unit_name_col = None
+        for key, orig in norm_map.items():
+            if key in ('unitname', 'unit', 'name'):
+                unit_name_col = orig
+                break
+        if unit_name_col is None:
+            # Fallback to 'UnitName' if present, else log and return empty
+            if 'UnitName' in dest_df.columns:
+                unit_name_col = 'UnitName'
+            else:
+                import logging
+                logging.warning(f"transform_unit: destination unit column not found in {list(dest_df.columns)}")
+                return df
+
+        # Debug: show dest table sample and inferred candidate units
+        try:
+            print(f"transform_unit: dest unit column detected as '{unit_name_col}'. dest sample: {dest_df[unit_name_col].astype(str).dropna().head(5).tolist()}")
+            print(f"transform_unit: candidate_units: {list(candidate_units)}")
+        except Exception:
+            pass
+
+        dest_lower = dest_df.assign(_key=dest_df[unit_name_col].astype(str).str.lower())
         mask = dest_lower['_key'].isin(candidate_units)
         filtered = dest_lower[mask].drop(columns=['_key']).copy().reset_index(drop=True)
-        df = pd.concat([df, filtered], ignore_index=True)
+        print(f"transform_unit: matched units count={len(filtered)}; matched sample={filtered.head(5).to_dict(orient='list')}")
+        if filtered.empty:
+            # Fallback: if no candidate units matched, include entire destination unit table so lookups later can fuzzy-match
+            print("transform_unit: no matches found — falling back to full DE1_Unit table to allow fuzzy matching")
+            df = pd.concat([df, dest_df.copy().reset_index(drop=True)], ignore_index=True)
+        else:
+            df = pd.concat([df, filtered], ignore_index=True)
 
     return df
 

@@ -120,7 +120,7 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
     INTELLIGENT MAPPING RULES:
     
     1. FINANCIAL MAPPING:
-       - Look for columns with patterns: amount, cost, price, paid, expense, spend, total, value
+       - Look for columns with patterns: amount, cost, price, paid, expense, spend, total, value, totalpaid, TotalPaid, Total_Paid, TotalPaid, TotalPaidAmount
        - Map to 'PaidAmount' for expense-based calculations
        - Consider currency-related columns for CurrencyID mapping
     
@@ -163,6 +163,18 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
          - District Heating: Centralized heating systems.
          - Natural Gas: Methane-based fuel, piped or liquefied.
     """
+
+    critical_rule ="""
+
+    CRITICAL RULES:
+     - Always analyze both column names and sample values. If a column name is ambiguous, use the sample values to infer the correct mapping.
+     - If a column contains values like 'biogas', 'district', or 'gas', map these to the appropriate energy source type in the destination schema, even if the column name is not descriptive.
+     - If a column contains values like 'USD', 'EUR', 'GBP', etc., map these to the appropriate CurrencyID in the destination schema, even if the column name is not descriptive.
+     - If a column contains values like 'm3', 'kWh', 'kgCO2e', etc., map these to the appropriate UnitID in the destination schema, even if the column name is not descriptive.
+     - If a column contains values like '2023-01-01', '01/01/2023', etc., map these to the DateKey in the destination schema, even if the column name is not descriptive.
+
+
+"""
     
     # Add specific rules based on calculation method
     if calc_method == 'Consumption-based':
@@ -185,7 +197,7 @@ def build_enhanced_mapping_rules(calc_method: str, activity_cat: str, activity_s
     # Add activity-specific rules
     activity_rules = get_activity_specific_rules(activity_cat, activity_sub_cat)
     
-    return base_rules + consumption_rules + activity_rules
+    return base_rules + critical_rule + consumption_rules + activity_rules
 
 def get_consumption_types(activity_cat: str, activity_sub_cat: str) -> str:
     """

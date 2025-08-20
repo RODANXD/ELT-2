@@ -206,8 +206,49 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
     # Tranform ActivityEmissionSourceProvider dimension - preserve functionality
     activity_emmission_source_provider_df = transform_emission_source_provider(mapping, source_df, dest_tables['DE1_ActivityEmissionSourceProvi'])
 
+    # Helper to find destination table by name case-insensitively and ignoring whitespace/punctuation
+    import re
+    def _get_dest_table(tables: dict, name: str):
+        if not tables:
+            return None
+        # direct match
+        for k in tables.keys():
+            if k.strip().lower() == name.strip().lower():
+                return tables[k]
+        # normalized match (remove non-alphanums)
+        target = re.sub(r'[^a-z0-9]', '', name.lower())
+        for k in tables.keys():
+            if re.sub(r'[^a-z0-9]', '', k.lower()) == target:
+                return tables[k]
+        # substring fallback
+        for k in tables.keys():
+            if target in re.sub(r'[^a-z0-9]', '', k.lower()):
+                return tables[k]
+        return None
+
     # Transform Unit dimension - preserve functionality as it was working correctly
-    unit_df = transform_unit(mapping, source_df, dest_tables['DE1_Unit'], calc_method)
+    try:
+        print(f"transformer: dest_tables keys={list(dest_tables.keys())}")
+    except Exception:
+        pass
+
+    de1_unit_table = _get_dest_table(dest_tables, 'DE1_Unit')
+    if de1_unit_table is None:
+        print("transformer: WARNING - DE1_Unit not found in dest_tables (keys may differ).")
+    else:
+        try:
+            print(f"transformer: DE1_Unit columns={list(de1_unit_table.columns)}; rows={len(de1_unit_table)}")
+            print(f"transformer: DE1_Unit sample={de1_unit_table.head(6).to_dict(orient='list')}")
+        except Exception:
+            pass
+
+    unit_df = transform_unit(mapping, source_df, de1_unit_table if de1_unit_table is not None else pd.DataFrame(), calc_method)
+    # Debug: show what unit_df contains after transform_unit
+    try:
+        print(f"transformer: unit_df columns={list(unit_df.columns)}; empty={unit_df.empty}")
+        print(f"transformer: unit_df sample={unit_df.head(6).to_dict(orient='list')}")
+    except Exception:
+        pass
 
     # Fixed Destination tables - filter to include only relevant categories/subcategories
     activity_cat_df = dest_tables['DE1_ActivityCategory'][dest_tables['DE1_ActivityCategory']['ActivityCategory'].str.lower() == activity_cat.lower()].copy()

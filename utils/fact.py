@@ -9,7 +9,9 @@ from rich import print as rprint
 import streamlit as st
 from .progress_state import update_progress
 from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
-from .mapping_utils import normalize_text, fuzzy_match_value_to_list, normalize_unit, extract_unit_from_column
+from .mapping_utils import normalize_text, normalize_unit, extract_unit_from_column, extract_unit_from_value
+from . import mapping_utils
+from fuzzywuzzy import process as _fuzzy_process
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -25,6 +27,7 @@ def safe_int_conversion(value):
     except (ValueError, TypeError):
         return None
 
+import re
 def safe_float_conversion(value):
     """
     Safely convert a value to float, handling NaN and None values.
@@ -33,6 +36,10 @@ def safe_float_conversion(value):
     if pd.isna(value) or value is None:
         return None
     try:
+        # print("????????????????????", value, type(value))  # Debugging line
+        if isinstance(value, str):
+            # Remove commas and other non-numeric characters
+            value = re.sub(r'[^\d.-]', '', value)
         return float(value)
     except (ValueError, TypeError):
         return None
@@ -73,7 +80,7 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     if not emission_source_id:
         # fuzzy match transformation to ActivityEmissionSourceName
         candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
-        mapped = fuzzy_match_value_to_list(transformation, candidates, threshold=60) if transformation else None
+        mapped = mapping_utils.fuzzy_match_value_to_list(transformation, candidates, threshold=60) if transformation else None
         if mapped:
             row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
             if not row.empty:
@@ -85,6 +92,8 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     
     # Get unit ID and emission factor ID
     unit_id = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'UnitID')
+
+    # print("@@@@@@@@@@@@@@@@@@@@@@@@@", unit_id, type(unit_id))  # Debugging line
     emission_source_name = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'ActivityEmissionSourceName')
     emission_factor_id = f"{iso2_code}_{emission_source_name.replace(' ', '_')}"
     
@@ -369,6 +378,12 @@ def generate_fact(
                     break
             if energy_col:
                 break
+        # Initialize raw_energy from detected energy column (if any)
+        raw_energy = None
+        if energy_col and energy_col in source_row.index:
+            raw_energy = source_row.get(energy_col)
+            if pd.notna(raw_energy):
+                raw_energy = str(raw_energy).strip()
             
         resolved_emission_source_id = None
         resolved_activity_subcat_from_energy = None
@@ -430,6 +445,7 @@ def generate_fact(
                         value_based_energy_type = canonical
                         value_based_col = col
                         value_based_val = val_str
+                        logging.info(f"match detail: pattern='{pattern}' -> canonical='{canonical}' on value='{val_str}' in column='{col}'")
                         break
                 if value_based_energy_type:
                     break
@@ -437,7 +453,7 @@ def generate_fact(
             # If found via value-based detection, override the previous mapping logic
             if value_based_energy_type:
                 mapped_energy_type = value_based_energy_type
-                logging.info(f"Value-based energy type detected: '{value_based_energy_type}' from column '{value_based_col}' and value '{value_based_val}'")
+                logging.info(f"🔎 Value-based energy type detected: '{value_based_energy_type}' from column '{value_based_col}' and value '{value_based_val}'")
                 # Lookup the corresponding ID
                 row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'] == mapped_energy_type]
                 if not row.empty:
@@ -445,6 +461,14 @@ def generate_fact(
                     if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
                         resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
                     logging.info(f"Found ID {resolved_emission_source_id} for '{mapped_energy_type}' (value-based)")
+                else:
+                    logging.warning(f"⚠️ Value-based mapping to '{mapped_energy_type}' found no row in DE1_ActivityEmissionSource.")
+                    # Debug: show available ActivityEmissionSourceName values
+                    try:
+                        samples = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist()
+                        logging.info(f"📋 ActivityEmissionSourceName candidates (sample): {samples[:30]}")
+                    except Exception:
+                        logging.info("📋 Could not read activity_emission_source_df names for debug")
         # --- END VALUE-BASED ENERGY TYPE DETECTION ---
 
         # If no direct mapping found, try fuzzy matching to ActivityEmissionSourceName
@@ -452,14 +476,22 @@ def generate_fact(
             # Use raw_energy if available, otherwise skip fuzzy matching
             if 'raw_energy' in locals() and raw_energy is not None:
                 candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
-                mapped = fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
+                logging.info(f"🔍 Attempting fuzzy match for raw_energy='{raw_energy}' against {len(candidates)} candidates")
+                try:
+                    top = _fuzzy_process.extract(str(raw_energy), candidates, limit=5)
+                    logging.info(f"🔢 Top fuzzy candidates: {top}")
+                except Exception as e:
+                    logging.info(f"🔢 Could not compute top fuzzy candidates: {e}")
+
+                mapped = mapping_utils.fuzzy_match_value_to_list(str(raw_energy), candidates, threshold=60)
+                logging.info(f"🔎 Fuzzy match result: {mapped}")
                 if mapped:
                     row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
                     if not row.empty:
                         resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
                         if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
                             resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
-                        logging.info(f"Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
+                        logging.info(f"✅ Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
                 else:
                     # fallback: try normalize and direct match
                     key = str(raw_energy).strip().lower().replace('_', ' ', regex=False).replace('-', ' ', regex=False)
@@ -481,10 +513,52 @@ def generate_fact(
                 
                 # If we still couldn't find a match, log a warning
                 if resolved_emission_source_id is None:
-                    logging.warning(f"Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
+                    logging.warning(f"❌ Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
             else:
                 logging.warning(f"Could not map energy type to any ActivityEmissionSourceName (no raw_energy available)")
 
+
+        # --- DEBUG: provide detailed context about ActivityEmissionSourceID resolution ---
+        try:
+            # Basic summary
+            logging.info(f"🔔 ActivityEmissionSourceID resolved: {resolved_emission_source_id}")
+
+            # Show which energy columns/values were considered
+            logging.info(f"🔧 energy_col={energy_col}, value_based_col={value_based_col}, value_based_val={value_based_val}")
+
+            # Show raw_energy if present
+            if 'raw_energy' in locals():
+                logging.info(f"🔎 raw_energy: {raw_energy}")
+
+            # Show a sample of the activity_emission_source_df for debugging
+            try:
+                logging.info(f"📋 ActivityEmissionSource table sample: {activity_emission_source_df.head(10).to_dict(orient='list')}")
+            except Exception:
+                logging.info("📋 Could not render activity_emission_source_df sample")
+
+            # If not resolved, compute and log top fuzzy candidates for extra insight
+            if resolved_emission_source_id is None:
+                try:
+                    candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+                    if 'raw_energy' in locals() and raw_energy is not None and candidates:
+                        top5 = _fuzzy_process.extract(str(raw_energy), candidates, limit=5)
+                        logging.info(f"🔢 Top fuzzy candidates for '{raw_energy}': {top5}")
+                    else:
+                        logging.info("🔢 No raw_energy available or no candidates to fuzzy-match against")
+                except Exception as e:
+                    logging.warning(f"⚠️ Error computing fuzzy candidates for ActivityEmissionSource: {e}")
+
+            # Show the current source row for context (limited fields)
+            try:
+                sr = source_row.to_dict()
+                # limit to 20 keys for readability
+                keys = list(sr.keys())[:20]
+                summary = {k: sr[k] for k in keys}
+                logging.info(f"🧾 Source row sample (first 20 cols): {summary}")
+            except Exception:
+                logging.info("🧾 Could not serialize source_row for debug")
+        except Exception as e:
+            logging.warning(f"⚠️ Error while logging ActivityEmissionSource debug info: {e}")
 
         # Assign resolved IDs
         new_row['ActivityEmissionSourceID'] = resolved_emission_source_id if resolved_emission_source_id is not None else None
@@ -507,7 +581,33 @@ def generate_fact(
         # Try to get unit from column, else infer from headers
         unit_name = None
         if unit_col and unit_col in source_df.columns:
-            unit_name = source_row[unit_col]
+            raw_val = source_row[unit_col]
+            logging.info(f"🔍 Inspecting unit column value for '{unit_col}': {raw_val!r} ({type(raw_val)})")
+            # If the column value is numeric (e.g., consumption amount) but the column name contains a unit
+            # (like 'Consumption_m3' or 'Volume (m3)'), infer the unit from the column name instead.
+            inferred_from_header = None
+            try:
+                # If the value looks numeric, prefer header-based inference
+                if pd.isna(raw_val):
+                    logging.info("ℹ️ Unit column value is NaN — will try to infer from header")
+                    inferred_from_header = extract_unit_from_column(unit_col)
+                elif isinstance(raw_val, (int, float)):
+                    logging.info("ℹ️ Unit column contains numeric value — inferring unit from header")
+                    inferred_from_header = extract_unit_from_column(unit_col)
+                else:
+                    # If it's a string, but looks like a number, also treat as numeric
+                    s = str(raw_val).strip()
+                    if re.match(r'^-?\d+(?:\.\d+)?$', s):
+                        logging.info("ℹ️ Unit column string value looks numeric — inferring unit from header")
+                        inferred_from_header = extract_unit_from_column(unit_col)
+            except Exception as e:
+                logging.warning(f"⚠️ Error while inferring from header: {e}")
+
+            if inferred_from_header:
+                logging.info(f"📌 Inferred unit from header '{unit_col}': {inferred_from_header}")
+                unit_name = inferred_from_header
+            else:
+                unit_name = raw_val
         else:
             # Try to infer from column names (e.g., 'consumption_m3', 'EmissionFactor_kgCO2e_per_m3')
             for col in source_df.columns:
@@ -517,13 +617,116 @@ def generate_fact(
                     break
                 
         if unit_name:
+            # Debug: show where the unit was picked from
+            logging.info(f"🔎 Unit column used: {unit_col}")
+            logging.info(f"🧾 Raw unit value: {unit_name!r}")
+
+            # If unit_name looks like a value containing a unit (e.g., '1484.8 kWh'), try extracting the unit token
+            try:
+                if isinstance(unit_name, str):
+                    extracted = extract_unit_from_value(unit_name)
+                    if extracted:
+                        logging.info(f"🔧 Extracted unit from value: {extracted!r} (from '{unit_name}')")
+                        unit_name = extracted
+            except Exception as e:
+                logging.warning(f"⚠️ Error extracting unit from value: {e}")
+
+            # Normalize and coerce to string, then perform case-insensitive, trimmed comparison
             normalized_unit_name = normalize_unit(unit_name)
-            unit_id_lookup = unit_df[unit_df['UnitName'].astype(str) == normalized_unit_name]
-            if not unit_id_lookup.empty:
-                unit_id = int(unit_id_lookup['UnitID'].iloc[0])
+            logging.info(f"⚙️ Normalized unit (mapping applied): {normalized_unit_name!r}")
+
+            norm_name = str(normalized_unit_name).strip().lower()
+            logging.info(f"🧼 Comparison key (trim+lower): {norm_name!r}")
+
+            # Ensure unit_df is populated; if empty, try pulling from dest_tables (fallback)
+            try:
+                if (unit_df is None or (hasattr(unit_df, 'empty') and unit_df.empty)) and dest_tables and 'DE1_Unit' in dest_tables:
+                    unit_df = dest_tables['DE1_Unit']
+                    print("fact.generate_fact: fallback loaded DE1_Unit from dest_tables into unit_df")
+            except Exception:
+                pass
+
+            # Show what unit_df contains (columns + sample)
+            try:
+                print(f"fact.generate_fact: unit_df columns={list(unit_df.columns)}; empty={unit_df.empty}")
+                print(f"fact.generate_fact: unit_df sample={unit_df.head(6).to_dict(orient='list')}")
+            except Exception:
+                pass
+
+            # Robustly determine unit name column in unit_df
+            unit_name_col = None
+            if unit_df is not None and not unit_df.empty:
+                norm_map = {re.sub(r'[^a-z0-9]', '', c.lower()): c for c in unit_df.columns}
+                for key, orig in norm_map.items():
+                    if key in ('unitname', 'unit'):
+                        unit_name_col = orig
+                        break
+                if unit_name_col is None and 'UnitName' in unit_df.columns:
+                    unit_name_col = 'UnitName'
+
+            logging.info(f"🔧 Using unit name column: {unit_name_col}")
+
+            unit_id = None
+            if unit_name_col and unit_name_col in unit_df.columns:
+                try:
+                    available = unit_df[unit_name_col].astype(str).str.strip().str.lower().unique().tolist()
+                except Exception:
+                    available = []
+                logging.info(f"🔎 Available destination unit names (sample): {available[:20]}")
+                # Extra low-level debug: show reprs and lengths to surface hidden characters
+                try:
+                    debug_reprs = [(u, repr(u), len(u)) for u in available[:20]]
+                    print(f"fact.generate_fact: available unit reprs (val, repr, len): {debug_reprs}")
+                except Exception:
+                    pass
+
+                # Exact match
+                unit_id_lookup = unit_df[unit_df[unit_name_col].astype(str).str.strip().str.lower() == norm_name]
+                if not unit_id_lookup.empty:
+                    unit_id = int(unit_id_lookup['UnitID'].iloc[0]) if 'UnitID' in unit_id_lookup.columns else int(unit_id_lookup.iloc[0,0])
+                    logging.info(f"✅ Matched UnitID: {unit_id} for unit '{normalized_unit_name}' using column '{unit_name_col}'")
+                else:
+                    # Try fuzzy match
+                    try:
+                        best = mapping_utils.fuzzy_match_value_to_list(normalized_unit_name, available, threshold=60)
+                        logging.info(f"🔍 Fuzzy best match for '{normalized_unit_name}' -> {best}")
+                        if best:
+                            unit_id_lookup = unit_df[unit_df[unit_name_col].astype(str).str.strip().lower() == str(best).strip().lower()]
+                            if not unit_id_lookup.empty:
+                                unit_id = int(unit_id_lookup['UnitID'].iloc[0]) if 'UnitID' in unit_id_lookup.columns else int(unit_id_lookup.iloc[0,0])
+                                logging.info(f"✅ Fuzzy Matched UnitID: {unit_id} for unit '{normalized_unit_name}'")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Fuzzy match error: {e}")
             else:
-                unit_id = None
+                logging.warning(f"⚠️ Could not find a unit name column in DE1_Unit to match '{normalized_unit_name}'")
+
+            if unit_id is None:
+                # Extra diagnostics: show unicode codepoints for normalized unit and available units
+                try:
+                    import unicodedata
+                    norm_ascii = unicodedata.normalize('NFKD', str(normalized_unit_name)).encode('ascii', 'ignore').decode().strip().lower()
+                    available_ascii = [unicodedata.normalize('NFKD', str(a)).encode('ascii','ignore').decode().strip().lower() for a in available]
+                except Exception:
+                    norm_ascii = None
+                    available_ascii = []
+
+                try:
+                    # show codepoints for the searched unit
+                    cp_norm = [hex(ord(ch)) for ch in str(normalized_unit_name)]
+                except Exception:
+                    cp_norm = []
+
+                try:
+                    cp_available = {a: [hex(ord(ch)) for ch in a] for a in available[:20]}
+                except Exception:
+                    cp_available = {}
+
+                logging.warning(f"❌ No UnitID match for '{normalized_unit_name}' (looked for {norm_name})")
+                logging.info(f"diagnostics: normalized ascii='{norm_ascii}', available_ascii sample={available_ascii[:20]}")
+                logging.info(f"diagnostics: normalized codepoints={cp_norm}")
+                logging.info(f"diagnostics: available codepoints sample={cp_available}")
         else:
+            logging.warning("⚠️ No unit found in row or headers; UnitID will be set to None")
             unit_id = None
         
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
@@ -546,9 +749,14 @@ def generate_fact(
                     emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
             
             if country_iso2 and emission_source_name:
+                # Debug: show what emission_source_name lookup returned
+                try:
+                    logging.info(f"Emission source lookup row(s): {emission_source_name_lookup.to_dict(orient='list')}")
+                except Exception:
+                    pass
                 # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
                 new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
-                logging.info(f"Generated new EmissionFactorID: {new_row['EmissionFactorID']}")
+                logging.info(f"Generated new EmissionFactorID: {new_row['EmissionFactorID']} (country_iso2={country_iso2}, emission_source_name={emission_source_name})")
             else:
                 new_row['EmissionFactorID'] = "Unknown_EmissionFactor"
                 if not country_iso2:
@@ -615,6 +823,7 @@ def generate_fact(
                         logging.warning(f"Could not calculate distance for air travel - no valid airport codes found")
                 elif source_column and source_column in source_df.columns:
                     value = source_row[source_column]
+                    # print("###############", value)
                     # Use safe float conversion function
                     new_row[field_name] = safe_float_conversion(value)
                     if new_row[field_name] is None:
@@ -702,9 +911,11 @@ def generate_fact(
                     # Handle NaN values in currency code
                     if pd.isna(currency_code) or currency_code is None:
                         new_row[field_name] = None
+                        logging.info(f"💸 [CurrencyID] Source column '{source_column}' is NaN or None for row {index+1}")
                     else:
                         currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
                         new_row[field_name] = safe_int_conversion(currency_id)
+                        logging.info(f"💱 [CurrencyID] Mapped currency code '{currency_code}' to CurrencyID '{currency_id}' for row {index+1}")
                 else:
                     # Enhanced currency detection from column names if no explicit mapping
                     detected_currency = None
@@ -716,17 +927,18 @@ def generate_fact(
                             currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
                             if currency_id is not None:
                                 detected_currency = currency_id
-                                logging.info(f"Auto-detected currency '{extracted_currency}' from column '{col}'")
+                                logging.info(f"🔍💱 [CurrencyID] Auto-detected currency '{extracted_currency}' from column '{col}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
                                 break
-                    
+        
                     if detected_currency is not None:
                         new_row[field_name] = safe_int_conversion(detected_currency)
                     elif not currency_df.empty:
                         # Fallback to default currency
                         new_row[field_name] = safe_int_conversion(currency_df['CurrencyID'].iloc[0])
-                        logging.info(f"Using default currency ID: {currency_df['CurrencyID'].iloc[0]}")
+                        logging.info(f"⚠️💱 [CurrencyID] No explicit or detected currency, using default CurrencyID '{currency_df['CurrencyID'].iloc[0]}' for row {index+1}")
                     else:
                         new_row[field_name] = None
+                        logging.warning(f"❌💱 [CurrencyID] No currency could be mapped for row {index+1}")
         
         # Update progress
         progress = (index + 1) / total_records

@@ -84,9 +84,27 @@ def load_destination_tables(path=None, sheet_name=None, columns=None):
             # Read all sheets as before
             xls = pd.ExcelFile(path)
             tables = {}
+            # Debug: show sheet names present in the destination workbook
+            try:
+                print(f"load_destination_tables: sheets found = {xls.sheet_names}")
+            except Exception:
+                pass
             for sheet in xls.sheet_names:
                 tables[sheet] = pd.read_excel(xls, sheet_name=sheet)
                 logger.debug(f"Loaded fixed table: {sheet} with {len(tables[sheet])} rows")
+
+            # Extra debug: if DE1_Unit not present or empty, show nearest matches
+            if 'DE1_Unit' in tables:
+                try:
+                    print(f"load_destination_tables: DE1_Unit columns={list(tables['DE1_Unit'].columns)}; rows={len(tables['DE1_Unit'])}")
+                    print(f"load_destination_tables: DE1_Unit sample={tables['DE1_Unit'].head(6).to_dict(orient='list')}")
+                except Exception:
+                    pass
+            else:
+                # look for sheets with 'unit' in name
+                unit_like = [s for s in xls.sheet_names if 'unit' in s.lower()]
+                print(f"load_destination_tables: DE1_Unit not found. unit-like sheets: {unit_like}")
+
             logger.info("Destination tables loaded successfully.")
             return tables
     except Exception as e:
