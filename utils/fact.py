@@ -706,9 +706,25 @@ def generate_fact(
                         currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
                         new_row[field_name] = safe_int_conversion(currency_id)
                 else:
-                    # If no mapping exists, try to find a default currency
-                    if not currency_df.empty:
+                    # Enhanced currency detection from column names if no explicit mapping
+                    detected_currency = None
+                    for col in source_df.columns:
+                        from .mapping_utils import extract_currency_from_column
+                        extracted_currency = extract_currency_from_column(col)
+                        if extracted_currency:
+                            # Check if this currency exists in our currency dimension table
+                            currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
+                            if currency_id is not None:
+                                detected_currency = currency_id
+                                logging.info(f"Auto-detected currency '{extracted_currency}' from column '{col}'")
+                                break
+                    
+                    if detected_currency is not None:
+                        new_row[field_name] = safe_int_conversion(detected_currency)
+                    elif not currency_df.empty:
+                        # Fallback to default currency
                         new_row[field_name] = safe_int_conversion(currency_df['CurrencyID'].iloc[0])
+                        logging.info(f"Using default currency ID: {currency_df['CurrencyID'].iloc[0]}")
                     else:
                         new_row[field_name] = None
         

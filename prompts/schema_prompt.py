@@ -302,6 +302,11 @@ def build_prompt(source_columns: List[str], dest_schema: Dict, source_table_name
     
     IMPORTANT: You must analyze both column names and the actual data values in each column. If a column name is ambiguous, use the sample values to infer the correct mapping. For example, if a column contains values like 'biogas', 'district', or 'gas', map these to the appropriate energy source type in the destination schema, even if the column name is not descriptive.
     
+    AUTOMATIC DETECTION FEATURES:
+    - Currency Detection: The system automatically detects currency codes from column names like 'amount_USD', 'price_EUR', 'Total (GBP)', etc.
+    - Unit Detection: The system automatically detects units from column names like 'consumption_m3', 'Volume (m3)', etc.
+    - Energy Type Detection: The system automatically detects energy types from data values, not just column names
+    
     You are an expert AI data mapper. Your task is to intelligently map source columns to destination schema fields based on:
     1. Column name patterns and semantics
     2. Data content analysis

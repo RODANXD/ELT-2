@@ -54,3 +54,26 @@ def extract_unit_from_column(col_name):
         return normalize_unit(match.group(1))
     return None
 
+def extract_currency_from_column(col_name):
+    """
+    Extract currency code from column names like 'amount_USD', 'price_EUR', 'Total (GBP)', etc.
+    """
+    # Common currency patterns in column names
+    currency_patterns = [
+        r'(?:amount|price|cost|total|paid|expense|spend|value|fee|charge)[_-]?([A-Z]{3})',  # amount_USD, price-EUR
+        r'\(([A-Z]{3})\)',  # (USD), (EUR)
+        r'_([A-Z]{3})$',    # _USD, _EUR at end
+        r'_([A-Z]{3})_',    # _USD_ in middle
+        r'([A-Z]{3})_',     # USD_ at start
+        r'([A-Z]{3})$',     # USD at end
+    ]
+    
+    for pattern in currency_patterns:
+        match = re.search(pattern, col_name, re.IGNORECASE)
+        if match:
+            currency_code = match.group(1).upper()
+            # Validate that it's a 3-letter currency code
+            if len(currency_code) == 3 and currency_code.isalpha():
+                return currency_code
+    return None
+

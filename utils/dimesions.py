@@ -132,7 +132,7 @@ def transform_D_Date(mapping, source_df, ReportingYear) -> pd.DataFrame:
         quarter_end = date_col.dt.to_period('Q').dt.end_time
         
         date_df = pd.DataFrame({
-            'DateKey': date_col.dt.strftime('%Y%m%d').astype('int'),
+            "DateKey": date_col.dt.strftime("%Y%m%d").astype("Int64"),
             'StartDate': quarter_start.dt.date,
             'EndDate': quarter_end.dt.date,
             'Description': date_col.dt.year.astype(str) + ' Quarter ' + date_col.dt.quarter.astype(str) + ' Report',
@@ -201,7 +201,14 @@ def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFr
         cand = source_df[currency_col].dropna().astype(str).str.upper().str.strip().unique().tolist()
         candidate_codes.update([c[:3] for c in cand])  # normalize to 3 letters if a longer string appears
 
-    # from headers (Paid_EUR, TotalPaidEUR, etc.)
+    # from headers (Paid_EUR, TotalPaidEUR, etc.) - Enhanced with new extraction function
+    from .mapping_utils import extract_currency_from_column
+    for col in source_df.columns:
+        extracted_currency = extract_currency_from_column(col)
+        if extracted_currency:
+            candidate_codes.add(extracted_currency)
+    
+    # Also keep the old header inference as fallback
     candidate_codes.update(_infer_currency_hints_from_headers(list(source_df.columns)))
 
     if candidate_codes:
