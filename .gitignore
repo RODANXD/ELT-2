@@ -11,6 +11,7 @@ __pycache__/
 *.so
 .env
 .env/
+inputs/
 OpenAI creds.txt
 # Distribution / packaging
 .Python
