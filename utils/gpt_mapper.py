@@ -10,6 +10,7 @@ logger = setup_logger("gpt_mapper")
 
 # Enhanced prompt builder - you'll need to update prompts/schema_prompt.py with the enhanced version
 from prompts.schema_prompt import build_prompt
+from . import mapping_utils
 
 client = AzureOpenAI(
     api_key=API_KEY,
@@ -215,6 +216,50 @@ def create_dynamic_fallback_mapping(source_df: pd.DataFrame, calc_method: str,
     logger.info(f"Detected {detected} source column mappings dynamically")
     
     return mapping
+
+
+def classify_energy_value(value: str, candidate_names: list, max_tokens: int = 200) -> str:
+    """
+    Use GPT to choose the best ActivityEmissionSourceName for a given raw energy value.
+    Returns the chosen name (exact string from candidate_names) or None.
+    """
+    if not value or not candidate_names:
+        return None
+
+    # Build a concise prompt asking the model to pick the best match from the provided list
+    choices_block = "\n".join([f"- {c}" for c in candidate_names])
+    user_prompt = f"""
+You are an expert mapper. Given a raw source value: "{value}", choose the single best matching canonical ActivityEmissionSourceName from the list below. Return only the exact name from the list if confident, otherwise return "NONE".
+
+Candidates:
+{choices_block}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a precise mapping assistant. Only output one of the candidate names or NONE."},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.0,
+            max_tokens=max_tokens
+        )
+        raw = response.choices[0].message.content.strip()
+        # If model returned a fenced block extract it
+        raw = _extract_json_from_markdown(raw)
+        # Try to match returned text to one of the candidates (case-insensitive)
+        for c in candidate_names:
+            if raw.lower() == c.strip().lower():
+                return c
+        if raw.strip().upper() == 'NONE':
+            return None
+        # Otherwise try fuzzy match locally
+        best = mapping_utils.fuzzy_match_value_to_list(raw, candidate_names, threshold=60)
+        return best
+    except Exception as e:
+        logger.error(f"Energy classification GPT call failed: {e}")
+        return None
 
 def map_schema_with_gpt(source_columns: list, dest_schema: dict, source_table_name: str, 
                        calc_method: str, activity_cat: str, activity_sub_cat: str, 

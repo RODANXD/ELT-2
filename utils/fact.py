@@ -11,6 +11,11 @@ from .progress_state import update_progress
 from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
 from .mapping_utils import normalize_text, normalize_unit, extract_unit_from_column, extract_unit_from_value
 from . import mapping_utils
+# Optional AI-based classification (will be used as a last-resort fallback)
+try:
+    from .gpt_mapper import classify_energy_value
+except Exception:
+    classify_energy_value = None
 from fuzzywuzzy import process as _fuzzy_process
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -623,13 +628,13 @@ def generate_fact(
                         logging.info(f"✅ Fuzzy matched '{raw_energy}' to '{mapped}' with ID {resolved_emission_source_id}")
                 else:
                     # fallback: try normalize and direct match
-                    key = str(raw_energy).strip().lower().replace('_', ' ', regex=False).replace('-', ' ', regex=False)
+                    key = str(raw_energy).strip().lower().replace('_', ' ').replace('-', ' ')
                     key = " ".join(key.split())
                     aes_df_norm = activity_emission_source_df.copy()
                     aes_df_norm['_norm'] = (
                         aes_df_norm['ActivityEmissionSourceName'].astype(str)
-                        .str.lower().str.replace('_', ' ', regex=False)
-                        .str.replace('-', ' ', regex=False)
+                        .str.lower().str.replace('_', ' ')
+                        .str.replace('-', ' ')
                         .str.replace(r'\s+', ' ', regex=True).str.strip()
                     )
 
@@ -640,6 +645,49 @@ def generate_fact(
                             resolved_activity_subcat_from_energy = int(match['ActivitySubcategoryID'].iloc[0])
                         logging.info(f"Direct matched normalized '{key}' to ID {resolved_emission_source_id}")
                 
+                # If still unresolved, try AI classification as a last resort
+                if resolved_emission_source_id is None and 'raw_energy' in locals() and raw_energy is not None and classify_energy_value is not None:
+                    try:
+                        candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+                        logging.info(f"🤖 [GPT] Attempting AI classification for raw_energy='{raw_energy}' using {len(candidates)} candidates")
+                        choice = classify_energy_value(raw_energy, candidates)
+                        logging.info(f"🤖 [GPT] Classification result: {choice}")
+                        if choice:
+                            row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str).str.lower() == choice.strip().lower()]
+                            if not row.empty:
+                                resolved_emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
+                                if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
+                                    resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
+                                logging.info(f"✅ GPT classified '{raw_energy}' to '{choice}' with ID {resolved_emission_source_id}")
+                            else:
+                                # Create new ActivityEmissionSource entry when not present
+                                try:
+                                    new_id = int(activity_emission_source_df['ActivityEmissionSourceID'].max()) + 1 if not activity_emission_source_df.empty else 1
+                                except Exception:
+                                    new_id = 1
+                                new_row = {
+                                    'ActivityEmissionSourceID': new_id,
+                                    'ActivityEmissionSourceName': choice,
+                                    'ActivitySubcategoryID': resolved_activity_subcat_from_energy if resolved_activity_subcat_from_energy is not None else (activity_subcat_df['ActivitySubcategoryID'].iloc[0] if not activity_subcat_df.empty else None),
+                                    'UnitID': None,
+                                }
+                                # Preserve other columns if present
+                                for col in activity_emission_source_df.columns:
+                                    if col not in new_row:
+                                        new_row[col] = None
+
+                                activity_emission_source_df = pd.concat([activity_emission_source_df, pd.DataFrame([new_row])], ignore_index=True)
+                                # Also update dest_tables if provided so downstream consumers see it
+                                if dest_tables is not None and 'DE1_ActivityEmissionSource' in dest_tables:
+                                    dest_tables['DE1_ActivityEmissionSource'] = activity_emission_source_df.copy()
+
+                                resolved_emission_source_id = new_id
+                                if new_row.get('ActivitySubcategoryID') is not None:
+                                    resolved_activity_subcat_from_energy = int(new_row.get('ActivitySubcategoryID'))
+                                logging.info(f"🆕 Created new ActivityEmissionSource '{choice}' with ID {resolved_emission_source_id}")
+                    except Exception as e:
+                        logging.warning(f"⚠️ GPT classification failed: {e}")
+
                 # If we still couldn't find a match, log a warning
                 if resolved_emission_source_id is None:
                     logging.warning(f"❌ Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
