@@ -241,7 +241,7 @@ def get_activity_specific_rules(activity_cat: str, activity_sub_cat: str) -> str
     elif 'energy' in activity_cat.lower() or 'electricity' in activity_sub_cat.lower():
         rules += """
     - Look for energy consumption columns (kwh, mwh, energy_usage, consumption)
-    - Look for energy type columns (electricity, gas, renewable, grid, energy_origin, energyorigin, energy_type, supply, supplycategory, SupplyCategory, HeatSource, EnergySource,)
+    - Look for energy type columns (electricity, gas, renewable, grid, energy_origin, energyorigin, energy_type, supply, supplycategory, SupplyCategory, HeatSource, EnergySource, Category)
     - ConsumptionAmount: "Energy" or "Electricity" type
     - For energy origin/type mapping, use these standard mappings:
         * Green Electricity: green, renewable, solar, wind, hydro, clean energy, solar PPA
