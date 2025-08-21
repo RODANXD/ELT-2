@@ -47,15 +47,23 @@ def safe_float_conversion(value):
 def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_emission_source_df, country_df, country, calc_method):
     """Returns ActivityEmissionSourceID, UnitID, and EmissionFactorID based on mapping conditions."""
     
+    logging.info(f"🔍 [find_emission_ids] Starting emission ID resolution for {activity_subcat}")
+    logging.info(f"🔍 [find_emission_ids] Calculation method: {calc_method}")
+    logging.info(f"🔍 [find_emission_ids] Country: {country}")
+    
     # Get basic lookup values
     activity_sub_cat_id = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
+    logging.info(f"🔍 [find_emission_ids] ActivitySubcategoryID: {activity_sub_cat_id}")
+    
     iso2_code = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
+    logging.info(f"🔍 [find_emission_ids] Country ISO2Code: {iso2_code}")
     
     # Special handling for Electricity (ActivitySubcategoryID 21)
     
     
     # Define transformation suffixes based on calc_method
     valid_transformations = ['Distance', 'Fuel', 'Electricity', 'Heating', 'Days'] if calc_method == 'Consumption-based' else ['Currency']
+    logging.info(f"🔍 [find_emission_ids] Valid transformations for {calc_method}: {valid_transformations}")
     
     # Find the first matching transformation
     transformation = None
@@ -63,50 +71,86 @@ def find_emission_ids(mappings, activity_subcat, activity_subcat_df, activity_em
     for key, mapping_info in mappings.items():
         if amount_key in key:
             trans = mapping_info.get('consumption_type', '').lower()
+            logging.info(f"🔍 [find_emission_ids] Found consumption_type '{trans}' in mapping key '{key}'")
             print(trans, '=', [x.lower() for x in valid_transformations])
             if trans in [x.lower() for x in valid_transformations]:
                 transformation = trans
+                logging.info(f"🔍 [find_emission_ids] Selected transformation: '{transformation}'")
                 break
 
     if not transformation:
-        logging.warning(f"No valid transformation found for {activity_subcat}")
+        logging.warning(f"⚠️ [find_emission_ids] No valid transformation found for {activity_subcat}")
         return None, None, None
     
     # Get emission source ID by suffix
     # Try to match emission source intelligently: by suffix first, else fuzzy match on names
+    logging.info(f"🔍 [find_emission_ids] Looking for emission source with suffix '{transformation}' and subcategory ID {activity_sub_cat_id}")
+    
     emission_source_id = get_emission_source_id_by_suffix(
         activity_emission_source_df, activity_sub_cat_id, transformation
     )
+    logging.info(f"🔍 [find_emission_ids] Emission source ID by suffix: {emission_source_id}")
+    
     if not emission_source_id:
         # fuzzy match transformation to ActivityEmissionSourceName
+        logging.info(f"🔍 [find_emission_ids] No suffix match, trying fuzzy matching...")
         candidates = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist() if not activity_emission_source_df.empty else []
+        logging.info(f"🔍 [find_emission_ids] Available emission source names: {candidates[:10]}...")
+        
         mapped = mapping_utils.fuzzy_match_value_to_list(transformation, candidates, threshold=60) if transformation else None
+        logging.info(f"🔍 [find_emission_ids] Fuzzy match result: {mapped}")
+        
         if mapped:
             row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'].astype(str) == mapped]
             if not row.empty:
                 emission_source_id = int(row['ActivityEmissionSourceID'].iloc[0])
+                logging.info(f"🔍 [find_emission_ids] Fuzzy matched '{transformation}' to '{mapped}' with ID {emission_source_id}")
     
     if not emission_source_id:
-        logging.warning(f"No emission source ID found for {activity_subcat}")
+        logging.warning(f"❌ [find_emission_ids] No emission source ID found for {activity_subcat}")
         return None, None, None
     
     # Get unit ID and emission factor ID
     unit_id = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'UnitID')
+    logging.info(f"🔍 [find_emission_ids] Unit ID: {unit_id}")
 
-    # print("@@@@@@@@@@@@@@@@@@@@@@@@@", unit_id, type(unit_id))  # Debugging line
+    # Get emission source name for EmissionFactorID generation
     emission_source_name = lookup_value(activity_emission_source_df, 'ActivityEmissionSourceID', emission_source_id, 'ActivityEmissionSourceName')
+    logging.info(f"🔍 [find_emission_ids] Emission source name: '{emission_source_name}'")
+    
+    # Generate EmissionFactorID
     emission_factor_id = f"{iso2_code}_{emission_source_name.replace(' ', '_')}"
+    logging.info(f"🔍 [find_emission_ids] Generated EmissionFactorID: '{emission_factor_id}'")
+    
+    # WARNING: This EmissionFactorID may be incorrect if the emission source is later overridden by value-based detection
+    logging.warning(f"⚠️ [find_emission_ids] WARNING: This EmissionFactorID '{emission_factor_id}' may be overridden by value-based detection later")
     
     return emission_source_id, unit_id, emission_factor_id
 
 
 def get_emission_source_id_by_suffix(df, subcategory_id, suffix):
     """Get emission source ID for sources ending with suffix (case-insensitive) and matching subcategory ID."""
+    logging.info(f"🔍 [get_emission_source_id_by_suffix] Looking for suffix '{suffix}' with subcategory ID {subcategory_id}")
+    
+    # Show available emission sources for this subcategory
+    available_sources = df[df['ActivitySubcategoryID'] == subcategory_id]
+    logging.info(f"🔍 [get_emission_source_id_by_suffix] Available sources for subcategory {subcategory_id}: {available_sources[['ActivityEmissionSourceID', 'ActivityEmissionSourceName']].to_dict(orient='list')}")
+    
     filtered = df[
         (df['ActivitySubcategoryID'] == subcategory_id) &
         (df['ActivityEmissionSourceName'].str.lower().str.contains(suffix.lower()))
     ]
-    return filtered.iloc[0]['ActivityEmissionSourceID'] if not filtered.empty else None
+    
+    logging.info(f"🔍 [get_emission_source_id_by_suffix] Sources containing suffix '{suffix}': {filtered[['ActivityEmissionSourceID', 'ActivityEmissionSourceName']].to_dict(orient='list')}")
+    
+    if not filtered.empty:
+        result = filtered.iloc[0]['ActivityEmissionSourceID']
+        emission_name = filtered.iloc[0]['ActivityEmissionSourceName']
+        logging.info(f"✅ [get_emission_source_id_by_suffix] Selected '{emission_name}' (ID: {result}) for suffix '{suffix}'")
+        return result
+    else:
+        logging.warning(f"⚠️ [get_emission_source_id_by_suffix] No sources found containing suffix '{suffix}' for subcategory {subcategory_id}")
+        return None
 
 
 
@@ -240,6 +284,13 @@ def generate_fact(
         mappings, activity_subcat, activity_subcat_df, activity_emission_source_df, 
         country_df, country, calc_method
     )
+    
+    # NOTE: The emission_factor_id generated above may be INCORRECT and will be overridden
+    # by the value-based energy type detection that happens later in the loop.
+    # This is why we ALWAYS regenerate the EmissionFactorID based on the final resolved ActivityEmissionSourceID.
+    logging.info(f"🔍 [Main Loop] Initial emission_factor_id: {emission_factor_id} (may be overridden)")
+    logging.info(f"🔍 [Main Loop] Initial emission_source_id: {emission_source_id} (may be overridden)")
+    logging.info(f"🔍 [Main Loop] Initial unit_id: {unit_id} (may be overridden)")
 
     # BUG FIX 2: Detect columns for airport distance calculation
     origin_column = None
@@ -423,8 +474,14 @@ def generate_fact(
             'central heating': 'District Heating',
             # Natural gas mappings
             'natural gas': 'Natural Gas',
+            'gas': 'Natural Gas',  # <-- FIX: Add "gas" mapping to Natural Gas
+            'naturalgas': 'Natural Gas',
+            'ng': 'Natural Gas',
             'lng': 'Natural Gas',
             'methane': 'Natural Gas',
+            'cng': 'Natural Gas',  # Compressed Natural Gas
+            'piped gas': 'Natural Gas',
+            'utility gas': 'Natural Gas',
         }
 
         # --- VALUE-BASED ENERGY TYPE DETECTION (NEW) ---
@@ -435,25 +492,88 @@ def generate_fact(
         
         # Only do value-based detection if we haven't already resolved the energy type
         if resolved_emission_source_id is None:
+            logging.info(f"🔍 [Value-Based Detection] Starting value-based energy type detection for row {index+1}")
+            logging.info(f"🔍 [Value-Based Detection] Available energy type mappings: {list(energy_type_mappings.keys())}")
+            
             for col in source_row.index:
                 val = source_row[col]
                 if pd.isna(val) or val is None:
                     continue
                 val_str = str(val).strip().lower()
+                logging.info(f"🔍 [Value-Based Detection] Checking column '{col}' with value '{val_str}'")
+                
                 for pattern, canonical in energy_type_mappings.items():
                     if pattern in val_str:
                         value_based_energy_type = canonical
                         value_based_col = col
                         value_based_val = val_str
-                        logging.info(f"match detail: pattern='{pattern}' -> canonical='{canonical}' on value='{val_str}' in column='{col}'")
+                        logging.info(f"✅ [Value-Based Detection] MATCH FOUND: pattern='{pattern}' -> canonical='{canonical}' on value='{val_str}' in column='{col}'")
                         break
+                    else:
+                        logging.debug(f"🔍 [Value-Based Detection] No match: pattern='{pattern}' not found in value='{val_str}'")
+                
                 if value_based_energy_type:
+                    logging.info(f"✅ [Value-Based Detection] Energy type resolved via value-based detection: '{value_based_energy_type}'")
                     break
+                else:
+                    logging.debug(f"🔍 [Value-Based Detection] No energy type found in column '{col}' with value '{val_str}'")
+            
+            if not value_based_energy_type:
+                logging.warning(f"⚠️ [Value-Based Detection] No energy type could be detected from any column values")
+                # Log all column values for debugging
+                all_values = {col: str(source_row[col]).strip() for col in source_row.index if pd.notna(source_row[col])}
+                logging.info(f"🔍 [Value-Based Detection] All column values in this row: {all_values}")
+                
+                # FALLBACK: Try fuzzy matching for energy types when exact matching fails
+                logging.info(f"🔍 [Value-Based Detection] Attempting fuzzy matching fallback...")
+                for col in source_row.index:
+                    val = source_row[col]
+                    if pd.isna(val) or val is None:
+                        continue
+                    val_str = str(val).strip().lower()
+                    
+                    # Skip if the value is too short or looks like a number
+                    if len(val_str) < 2 or val_str.replace('.', '').replace('-', '').isdigit():
+                        continue
+                    
+                    logging.info(f"🔍 [Value-Based Detection] Fuzzy matching column '{col}' with value '{val_str}'")
+                    
+                    # Try fuzzy matching against all available energy type patterns
+                    best_match = None
+                    best_score = 0
+                    threshold = 70  # Minimum similarity score
+                    
+                    for pattern, canonical in energy_type_mappings.items():
+                        try:
+                            from fuzzywuzzy import fuzz
+                            score = fuzz.ratio(val_str, pattern)
+                            if score > best_score and score >= threshold:
+                                best_score = score
+                                best_match = (pattern, canonical, score)
+                                logging.info(f"🔍 [Value-Based Detection] Fuzzy match candidate: '{val_str}' -> '{pattern}' (score: {score})")
+                        except Exception as e:
+                            logging.debug(f"🔍 [Value-Based Detection] Error in fuzzy matching: {e}")
+                    
+                    if best_match:
+                        pattern, canonical, score = best_match
+                        value_based_energy_type = canonical
+                        value_based_col = col
+                        value_based_val = val_str
+                        logging.info(f"✅ [Value-Based Detection] FUZZY MATCH FOUND: '{val_str}' -> '{pattern}' -> '{canonical}' (score: {score})")
+                        break
+                    else:
+                        logging.debug(f"🔍 [Value-Based Detection] No fuzzy match found for '{val_str}' (best score below threshold {threshold})")
+            
+            if not value_based_energy_type:
+                logging.warning(f"⚠️ [Value-Based Detection] No energy type could be detected from any column values")
+                # Log all column values for debugging
+                all_values = {col: str(source_row[col]).strip() for col in source_row.index if pd.notna(source_row[col])}
+                logging.info(f"🔍 [Value-Based Detection] All column values in this row: {all_values}")
             
             # If found via value-based detection, override the previous mapping logic
             if value_based_energy_type:
                 mapped_energy_type = value_based_energy_type
-                logging.info(f"🔎 Value-based energy type detected: '{value_based_energy_type}' from column '{value_based_col}' and value '{value_based_val}'")
+                logging.info(f"🎯 [Value-Based Detection] SUMMARY: Successfully detected '{value_based_energy_type}' from column '{value_based_col}' with value '{value_based_val}'")
                 # Lookup the corresponding ID
                 row = activity_emission_source_df[activity_emission_source_df['ActivityEmissionSourceName'] == mapped_energy_type]
                 if not row.empty:
@@ -470,6 +590,12 @@ def generate_fact(
                     except Exception:
                         logging.info("📋 Could not read activity_emission_source_df names for debug")
         # --- END VALUE-BASED ENERGY TYPE DETECTION ---
+        
+        # Summary of value-based detection results
+        if value_based_energy_type:
+            logging.info(f"🎯 [Value-Based Detection] SUMMARY: Successfully detected '{value_based_energy_type}' from column '{value_based_col}' with value '{value_based_val}'")
+        else:
+            logging.warning(f"⚠️ [Value-Based Detection] SUMMARY: No energy type could be detected from any column values")
 
         # If no direct mapping found, try fuzzy matching to ActivityEmissionSourceName
         if resolved_emission_source_id is None:
@@ -731,38 +857,57 @@ def generate_fact(
         
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
         
-        # Handle EmissionFactorID - Use pre-generated value if available, otherwise generate new one
-        if emission_factor_id is not None:
-            new_row['EmissionFactorID'] = emission_factor_id
-            logging.info(f"Using pre-generated EmissionFactorID: {emission_factor_id}")
+        # Handle EmissionFactorID - ALWAYS generate based on final resolved ActivityEmissionSourceID
+        # DO NOT use pre-generated emission_factor_id as it may be based on incorrect assumptions
+        logging.info(f"🔍 [EmissionFactorID] Starting generation process...")
+        logging.info(f"🔍 [EmissionFactorID] Pre-generated emission_factor_id: {emission_factor_id}")
+        logging.info(f"🔍 [EmissionFactorID] Final resolved ActivityEmissionSourceID: {new_row['ActivityEmissionSourceID']}")
+        
+        # Always generate EmissionFactorID based on country ISO2Code and final ActivityEmissionSourceName
+        country_iso2 = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
+        logging.info(f"🔍 [EmissionFactorID] Country: {country}, ISO2Code: {country_iso2}")
+        
+        # Get ActivityEmissionSourceName if we have ActivityEmissionSourceID
+        emission_source_name = None
+        if new_row['ActivityEmissionSourceID'] is not None:
+            emission_source_name_lookup = activity_emission_source_df[
+                activity_emission_source_df['ActivityEmissionSourceID'] == new_row['ActivityEmissionSourceID']
+            ]
+            if not emission_source_name_lookup.empty:
+                emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
+                logging.info(f"🔍 [EmissionFactorID] Found emission source name: '{emission_source_name}' for ID {new_row['ActivityEmissionSourceID']}")
+            else:
+                logging.warning(f"⚠️ [EmissionFactorID] No emission source found for ID {new_row['ActivityEmissionSourceID']}")
         else:
-            # Generate EmissionFactorID based on country ISO2Code and ActivityEmissionSourceName
-            country_iso2 = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
+            logging.warning(f"⚠️ [EmissionFactorID] ActivityEmissionSourceID is None, cannot generate EmissionFactorID")
+        
+        if country_iso2 and emission_source_name:
+            # Debug: show what emission_source_name lookup returned
+            try:
+                logging.info(f"🔍 [EmissionFactorID] Emission source lookup details: {emission_source_name_lookup.to_dict(orient='list')}")
+            except Exception as e:
+                logging.warning(f"⚠️ [EmissionFactorID] Error showing emission source lookup details: {e}")
             
-            # Get ActivityEmissionSourceName if we have ActivityEmissionSourceID
-            emission_source_name = None
-            if new_row['ActivityEmissionSourceID'] is not None:
-                emission_source_name_lookup = activity_emission_source_df[
-                    activity_emission_source_df['ActivityEmissionSourceID'] == new_row['ActivityEmissionSourceID']
-                ]
-                if not emission_source_name_lookup.empty:
-                    emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
+            # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
+            new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
+            logging.info(f"✅ [EmissionFactorID] Generated new EmissionFactorID: '{new_row['EmissionFactorID']}' (country_iso2='{country_iso2}', emission_source_name='{emission_source_name}')")
             
-            if country_iso2 and emission_source_name:
-                # Debug: show what emission_source_name lookup returned
-                try:
-                    logging.info(f"Emission source lookup row(s): {emission_source_name_lookup.to_dict(orient='list')}")
-                except Exception:
-                    pass
-                # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
-                new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
-                logging.info(f"Generated new EmissionFactorID: {new_row['EmissionFactorID']} (country_iso2={country_iso2}, emission_source_name={emission_source_name})")
+            # Log the difference if pre-generated was different
+            if emission_factor_id and emission_factor_id != new_row['EmissionFactorID']:
+                logging.warning(f"⚠️ [EmissionFactorID] Pre-generated was '{emission_factor_id}', but corrected to '{new_row['EmissionFactorID']}' based on actual data")
+        else:
+            if not country_iso2:
+                logging.error(f"❌ [EmissionFactorID] Missing country_iso2 for EmissionFactorID generation")
+            if not emission_source_name:
+                logging.error(f"❌ [EmissionFactorID] Missing emission_source_name for EmissionFactorID generation")
+            
+            # Fallback: try to use pre-generated if available, otherwise use unknown
+            if emission_factor_id:
+                logging.warning(f"⚠️ [EmissionFactorID] Using pre-generated as fallback: {emission_factor_id}")
+                new_row['EmissionFactorID'] = emission_factor_id
             else:
                 new_row['EmissionFactorID'] = "Unknown_EmissionFactor"
-                if not country_iso2:
-                    logging.warning(f"Missing country_iso2 for EmissionFactorID generation")
-                if not emission_source_name:
-                    logging.warning(f"Missing emission_source_name for EmissionFactorID generation")
+                logging.error(f"❌ [EmissionFactorID] No fallback available, using 'Unknown_EmissionFactor'")
 
         date_key = get_date_key(date_df, mappings.get('DateKey', {}).get('source_column'), reporting_year, source_row.get(mappings.get('DateKey', {}).get('source_column')))
         new_row['DateKey'] = int(date_key) if date_key is not None else None
@@ -908,20 +1053,77 @@ def generate_fact(
             if field_name == 'CurrencyID':
                 if source_column and source_column in source_df.columns:
                     currency_code = source_row[source_column]
-                    # Handle NaN values in currency code
-                    if pd.isna(currency_code) or currency_code is None:
+                    
+                    # Check if currency_code is numeric (like 103.13) - if so, extract from column name
+                    if pd.notna(currency_code) and currency_code is not None:
+                        try:
+                            # Try to convert to float to check if it's numeric
+                            float(currency_code)
+                            # If we get here, currency_code is numeric - extract currency from column name
+                            logging.info(f"💸 [CurrencyID] Source column '{source_column}' contains numeric value '{currency_code}' - extracting currency from column name")
+                            from .mapping_utils import extract_currency_from_column
+                            extracted_currency = extract_currency_from_column(source_column)
+                            logging.info(f"🔍💱 [CurrencyID] Column name: '{source_column}', Extracted currency: '{extracted_currency}'")
+                            if extracted_currency:
+                                # Check if this currency exists in our currency dimension table
+                                logging.info(f"🔍💱 [CurrencyID] Looking for currency '{extracted_currency}' in currency dimension table")
+                                try:
+                                    if not currency_df.empty:
+                                        available_currencies = currency_df['CurrencyCode'].astype(str).tolist() if 'CurrencyCode' in currency_df.columns else []
+                                        logging.info(f"🔍💱 [CurrencyID] Available currencies in dimension table: {available_currencies}")
+                                    else:
+                                        logging.warning(f"⚠️💱 [CurrencyID] Currency dimension table is empty!")
+                                except Exception as e:
+                                    logging.warning(f"⚠️💱 [CurrencyID] Error checking currency dimension table: {e}")
+                                
+                                currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
+                                if currency_id is not None:
+                                    new_row[field_name] = safe_int_conversion(currency_id)
+                                    logging.info(f"💱 [CurrencyID] Extracted currency '{extracted_currency}' from column name '{source_column}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
+                                else:
+                                    new_row[field_name] = None
+                                    logging.warning(f"⚠️💱 [CurrencyID] Extracted currency '{extracted_currency}' from column name '{source_column}' but not found in currency dimension table")
+                            else:
+                                new_row[field_name] = None
+                                logging.warning(f"⚠️💱 [CurrencyID] Could not extract currency from column name '{source_column}' for numeric value '{currency_code}'")
+                        except (ValueError, TypeError):
+                            # Not numeric, treat as regular currency code
+                            currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                            new_row[field_name] = safe_int_conversion(currency_id)
+                            if currency_id is not None:
+                                logging.info(f"💱 [CurrencyID] Mapped currency code '{currency_code}' to CurrencyID '{currency_id}' for row {index+1}")
+                            else:
+                                logging.warning(f"⚠️💱 [CurrencyID] Currency code '{currency_code}' not found in currency dimension table")
+                    else:
+                        # Handle NaN values in currency code
                         new_row[field_name] = None
                         logging.info(f"💸 [CurrencyID] Source column '{source_column}' is NaN or None for row {index+1}")
-                    else:
-                        currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
-                        new_row[field_name] = safe_int_conversion(currency_id)
-                        logging.info(f"💱 [CurrencyID] Mapped currency code '{currency_code}' to CurrencyID '{currency_id}' for row {index+1}")
                 else:
                     # Enhanced currency detection from column names if no explicit mapping
                     detected_currency = None
+                    
+                    # Debug: Show what we're working with
+                    logging.info(f"🔍💱 [CurrencyID] Row {index+1}: Starting enhanced currency detection...")
+                    logging.info(f"🔍💱 [CurrencyID] Available columns: {list(source_df.columns)}")
+                    logging.info(f"🔍💱 [CurrencyID] Current row values: {dict(source_row)}")
+                    
+                    # Step 1: Check column names for currency patterns (e.g., TotalPaid(EUR), amount_USD)
+                    logging.info(f"🔍💱 [CurrencyID] No explicit mapping - checking column names for currency patterns...")
+                    
+                    # Debug: Show available currencies in dimension table
+                    try:
+                        if not currency_df.empty:
+                            available_currencies = currency_df['CurrencyCode'].astype(str).tolist() if 'CurrencyCode' in currency_df.columns else []
+                            logging.info(f"🔍💱 [CurrencyID] Available currencies in dimension table: {available_currencies}")
+                        else:
+                            logging.warning(f"⚠️💱 [CurrencyID] Currency dimension table is empty!")
+                    except Exception as e:
+                        logging.warning(f"⚠️💱 [CurrencyID] Error checking currency dimension table: {e}")
+                    
                     for col in source_df.columns:
                         from .mapping_utils import extract_currency_from_column
                         extracted_currency = extract_currency_from_column(col)
+                        print("#######################", extracted_currency)
                         if extracted_currency:
                             # Check if this currency exists in our currency dimension table
                             currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
@@ -929,9 +1131,42 @@ def generate_fact(
                                 detected_currency = currency_id
                                 logging.info(f"🔍💱 [CurrencyID] Auto-detected currency '{extracted_currency}' from column '{col}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
                                 break
-        
+                    
+                    # Step 2: If no currency found in column names, check data values for currency codes
+                    if detected_currency is None:
+                        logging.info(f"🔍💱 [CurrencyID] No currency found in column names - checking data values for currency codes...")
+                        try:
+                            from .mapping_utils import extract_currency_from_value
+                            
+                            # Check a few sample rows for currency patterns
+                            sample_rows = source_df.head(10)  # Check first 10 rows
+                            found_currencies = set()
+                            
+                            for _, sample_row in sample_rows.iterrows():
+                                for col_name, value in sample_row.items():
+                                    if pd.notna(value):
+                                        # Use the new extract_currency_from_value function
+                                        extracted_currency = extract_currency_from_value(value)
+                                        if extracted_currency:
+                                            found_currencies.add(extracted_currency.upper())
+                            
+                            logging.info(f"🔍💱 [CurrencyID] Found currency codes in data values: {found_currencies}")
+                            
+                            # Try to match found currencies with our currency dimension table
+                            for found_currency in found_currencies:
+                                currency_id = lookup_value(currency_df, 'CurrencyCode', found_currency, 'CurrencyID')
+                                if currency_id is not None:
+                                    detected_currency = currency_id
+                                    logging.info(f"🔍💱 [CurrencyID] Auto-detected currency '{found_currency}' from data values and mapped to CurrencyID '{currency_id}' for row {index+1}")
+                                    break
+                                    
+                        except Exception as e:
+                            logging.warning(f"⚠️💱 [CurrencyID] Error while checking data values for currency: {e}")
+                    
+                    # Step 3: Apply the detected currency or fallback
                     if detected_currency is not None:
                         new_row[field_name] = safe_int_conversion(detected_currency)
+                        logging.info(f"✅💱 [CurrencyID] Successfully mapped currency for row {index+1}")
                     elif not currency_df.empty:
                         # Fallback to default currency
                         new_row[field_name] = safe_int_conversion(currency_df['CurrencyID'].iloc[0])

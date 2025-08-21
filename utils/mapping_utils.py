@@ -120,29 +120,62 @@ def extract_unit_from_column(col_name):
 
 def extract_currency_from_column(col_name):
     """
-    Extract currency code from column names like 'amount_USD', 'price_EUR', 'Total (GBP)', etc.
+    Extract currency code from column names like 'amount_USD', 'price_EUR', 'Total (GBP)', 'TotalPaid(EUR)', etc.
     """
-    # Common currency patterns in column names
-    currency_patterns = [
-        r'(?:amount|price|cost|total|paid|expense|spend|value|fee|charge)[_-]?([A-Z]{3})',  # amount_USD, price-EUR
-        r'\(([A-Z]{3})\)',  # (USD), (EUR)
-        r'_([A-Z]{3})$',    # _USD, _EUR at end
-        r'_([A-Z]{3})_',    # _USD_ in middle
-        r'([A-Z]{3})_',     # USD_ at start
-        r'([A-Z]{3})$',     # USD at end
-    ]
+    if not isinstance(col_name, str):
+        return None
     
-    for pattern in currency_patterns:
-        match = re.search(pattern, col_name, re.IGNORECASE)
-        if match:
-            currency_code = match.group(1).upper()
-            # Validate that it's a 3-letter currency code
-            if len(currency_code) == 3 and currency_code.isalpha():
-                return currency_code
-    # Additional pattern: look for parentheses with currency and optional surrounding text, e.g., 'TotalPaid(EUR)'
-    m = re.search(r'\(([A-Z]{3})\)', col_name)
-    if m:
-        return m.group(1).upper()
+    # Priority 1: Look for parentheses with currency codes first (most reliable)
+    # This handles: TotalPaid(EUR), Amount(USD), (GBP), etc.
+    parentheses_pattern = r'\(([A-Z]{3})\)'
+    match = re.search(parentheses_pattern, col_name, re.IGNORECASE)
+    if match:
+        currency_code = match.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using parentheses pattern")
+            return currency_code
+    
+    # Priority 2: Look for currency codes at the end of column names
+    # This handles: amount_USD, price_EUR, cost_GBP, etc.
+    end_pattern = r'[_-]([A-Z]{3})$'
+    match = re.search(end_pattern, col_name, re.IGNORECASE)
+    if match:
+        currency_code = match.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using end pattern")
+            return currency_code
+    
+    # Priority 3: Look for currency codes at the beginning of column names
+    # This handles: USD_amount, EUR_price, etc.
+    start_pattern = r'^([A-Z]{3})[_-]'
+    match = re.search(start_pattern, col_name, re.IGNORECASE)
+    if match:
+        currency_code = match.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using start pattern")
+            return currency_code
+    
+    # Priority 4: Look for currency codes in the middle with underscores
+    # This handles: amount_USD_total, price_EUR_net, etc.
+    middle_pattern = r'[_-]([A-Z]{3})[_-]'
+    match = re.search(middle_pattern, col_name, re.IGNORECASE)
+    if match:
+        currency_code = match.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using middle pattern")
+            return currency_code
+    
+    # Priority 5: Look for standalone currency codes at the very end
+    # This handles: amountUSD, priceEUR, etc.
+    standalone_pattern = r'([A-Z]{3})$'
+    match = re.search(standalone_pattern, col_name, re.IGNORECASE)
+    if match:
+        currency_code = match.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using standalone pattern")
+            return currency_code
+    
+    logging.info(f"extract_currency_from_column: No currency found in column '{col_name}'")
     return None
 
 
@@ -174,5 +207,55 @@ def extract_unit_from_value(value):
     if m2:
         return normalize_unit(m2.group(1))
 
+    return None
+
+
+def extract_currency_from_value(value):
+    """
+    Extract currency code from data values like '100 EUR', '200USD', '150.50 GBP', etc.
+    Returns the currency code if found, None otherwise.
+    """
+    if value is None:
+        return None
+    
+    value_str = str(value).strip()
+    
+    # Pattern 1: "100 EUR", "200 USD" (number + space + currency)
+    pattern1 = re.compile(r'\b(\d+(?:\.\d+)?)\s+([A-Z]{3})\b', re.IGNORECASE)
+    match1 = pattern1.search(value_str)
+    if match1:
+        currency_code = match1.group(2).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_value: Found currency '{currency_code}' in value '{value_str}' using space pattern")
+            return currency_code
+    
+    # Pattern 2: "100EUR", "200USD" (number + currency without space)
+    pattern2 = re.compile(r'\b(\d+(?:\.\d+)?)([A-Z]{3})\b', re.IGNORECASE)
+    match2 = pattern2.search(value_str)
+    if match2:
+        currency_code = match2.group(2).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_value: Found currency '{currency_code}' in value '{value_str}' using no-space pattern")
+            return currency_code
+    
+    # Pattern 3: "EUR 100", "USD 200" (currency + space + number)
+    pattern3 = re.compile(r'\b([A-Z]{3})\s+(\d+(?:\.\d+)?)\b', re.IGNORECASE)
+    match3 = pattern3.search(value_str)
+    if match3:
+        currency_code = match3.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_value: Found currency '{currency_code}' in value '{value_str}' using currency-first pattern")
+            return currency_code
+    
+    # Pattern 4: Just the currency code itself (e.g., "EUR", "USD")
+    pattern4 = re.compile(r'\b([A-Z]{3})\b', re.IGNORECASE)
+    match4 = pattern4.search(value_str)
+    if match4:
+        currency_code = match4.group(1).upper()
+        if len(currency_code) == 3 and currency_code.isalpha():
+            logging.info(f"extract_currency_from_value: Found currency '{currency_code}' in value '{value_str}' using standalone pattern")
+            return currency_code
+    
+    logging.info(f"extract_currency_from_value: No currency found in value '{value_str}'")
     return None
 
