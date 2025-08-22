@@ -487,6 +487,11 @@ def generate_fact(
             'cng': 'Natural Gas',  # Compressed Natural Gas
             'piped gas': 'Natural Gas',
             'utility gas': 'Natural Gas',
+            # Nuclear mappings -> treat as conventional electricity
+            'nuclear': 'Conventional Electricity',
+            'nuclear power': 'Conventional Electricity',
+            'nuclear energy': 'Conventional Electricity',
+            'atomic': 'Conventional Electricity',
         }
 
         # --- VALUE-BASED ENERGY TYPE DETECTION (NEW) ---
@@ -572,6 +577,34 @@ def generate_fact(
                     else:
                         logging.debug(f"🔍 [Value-Based Detection] No fuzzy match found for '{val_str}' (best score below threshold {threshold})")
             
+            # If fuzzy matching didn't resolve, try AI classification against destination ActivityEmissionSourceName
+            if not value_based_energy_type:
+                try:
+                    if classify_energy_value is not None and not activity_emission_source_df.empty:
+                        logger_msg = f"🤖 [Value-Based Detection] Attempting AI classification for row {index+1} using available ActivityEmissionSourceName candidates"
+                        logging.info(logger_msg)
+                        candidate_names = activity_emission_source_df['ActivityEmissionSourceName'].astype(str).tolist()
+                        # Try AI classification on non-numeric textual values in the row
+                        for col in source_row.index:
+                            val = source_row[col]
+                            if pd.isna(val) or val is None:
+                                continue
+                            val_str = str(val).strip()
+                            if len(val_str) < 2 or val_str.replace('.', '').replace('-', '').isdigit():
+                                continue
+                            try:
+                                choice = classify_energy_value(val_str, candidate_names)
+                                logging.info(f"🤖 [Value-Based Detection] AI classification result for '{val_str}': {choice}")
+                                if choice:
+                                    value_based_energy_type = choice
+                                    value_based_col = col
+                                    value_based_val = val_str
+                                    break
+                            except Exception as e:
+                                logging.debug(f"🤖 [Value-Based Detection] AI classification error for '{val_str}': {e}")
+                except Exception as e:
+                    logging.debug(f"🤖 [Value-Based Detection] AI classification overall error: {e}")
+
             if not value_based_energy_type:
                 logging.warning(f"⚠️ [Value-Based Detection] No energy type could be detected from any column values")
                 # Log all column values for debugging
@@ -659,32 +692,6 @@ def generate_fact(
                                 if 'ActivitySubcategoryID' in row.columns and not pd.isna(row['ActivitySubcategoryID'].iloc[0]):
                                     resolved_activity_subcat_from_energy = int(row['ActivitySubcategoryID'].iloc[0])
                                 logging.info(f"✅ GPT classified '{raw_energy}' to '{choice}' with ID {resolved_emission_source_id}")
-                            else:
-                                # Create new ActivityEmissionSource entry when not present
-                                try:
-                                    new_id = int(activity_emission_source_df['ActivityEmissionSourceID'].max()) + 1 if not activity_emission_source_df.empty else 1
-                                except Exception:
-                                    new_id = 1
-                                new_row = {
-                                    'ActivityEmissionSourceID': new_id,
-                                    'ActivityEmissionSourceName': choice,
-                                    'ActivitySubcategoryID': resolved_activity_subcat_from_energy if resolved_activity_subcat_from_energy is not None else (activity_subcat_df['ActivitySubcategoryID'].iloc[0] if not activity_subcat_df.empty else None),
-                                    'UnitID': None,
-                                }
-                                # Preserve other columns if present
-                                for col in activity_emission_source_df.columns:
-                                    if col not in new_row:
-                                        new_row[col] = None
-
-                                activity_emission_source_df = pd.concat([activity_emission_source_df, pd.DataFrame([new_row])], ignore_index=True)
-                                # Also update dest_tables if provided so downstream consumers see it
-                                if dest_tables is not None and 'DE1_ActivityEmissionSource' in dest_tables:
-                                    dest_tables['DE1_ActivityEmissionSource'] = activity_emission_source_df.copy()
-
-                                resolved_emission_source_id = new_id
-                                if new_row.get('ActivitySubcategoryID') is not None:
-                                    resolved_activity_subcat_from_energy = int(new_row.get('ActivitySubcategoryID'))
-                                logging.info(f"🆕 Created new ActivityEmissionSource '{choice}' with ID {resolved_emission_source_id}")
                     except Exception as e:
                         logging.warning(f"⚠️ GPT classification failed: {e}")
 
@@ -1112,8 +1119,30 @@ def generate_fact(
                             float(currency_code)
                             # If we get here, currency_code is numeric - extract currency from column name
                             logging.info(f"💸 [CurrencyID] Source column '{source_column}' contains numeric value '{currency_code}' - extracting currency from column name")
-                            from .mapping_utils import extract_currency_from_column
+                            from .mapping_utils import extract_currency_from_column, _currency_code_from_symbol_in_text, extract_currency_from_value, build_currency_symbol_map
                             extracted_currency = extract_currency_from_column(source_column)
+                            # If column name contains currency symbol like amount_€, map symbol to ISO code
+                            if not extracted_currency:
+                                # pass dest_tables DE1_Currency if available to build dynamic map
+                                currency_df_for_map = None
+                                try:
+                                    if dest_tables and 'DE1_Currency' in dest_tables:
+                                        currency_df_for_map = dest_tables['DE1_Currency']
+                                except Exception:
+                                    currency_df_for_map = None
+                                sym_code = _currency_code_from_symbol_in_text(source_column, currency_df_for_map)
+                                if sym_code:
+                                    extracted_currency = sym_code
+                            # If still not found, try to detect symbol in the value itself (e.g., '€100') using dynamic map
+                            if not extracted_currency:
+                                # try to detect symbol in the value (e.g., '€100')
+                                extracted_currency = extract_currency_from_value(currency_code)
+                                if not extracted_currency:
+                                    # try symbol based on destination currency table
+                                    try:
+                                        extracted_currency = _currency_code_from_symbol_in_text(str(currency_code), currency_df_for_map)
+                                    except Exception:
+                                        pass
                             logging.info(f"🔍💱 [CurrencyID] Column name: '{source_column}', Extracted currency: '{extracted_currency}'")
                             if extracted_currency:
                                 # Check if this currency exists in our currency dimension table

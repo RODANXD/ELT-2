@@ -236,6 +236,7 @@ Candidates:
 """
 
     try:
+        # Try direct GPT classification first
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -246,20 +247,29 @@ Candidates:
             max_tokens=max_tokens
         )
         raw = response.choices[0].message.content.strip()
-        # If model returned a fenced block extract it
         raw = _extract_json_from_markdown(raw)
-        # Try to match returned text to one of the candidates (case-insensitive)
         for c in candidate_names:
             if raw.lower() == c.strip().lower():
                 return c
         if raw.strip().upper() == 'NONE':
             return None
-        # Otherwise try fuzzy match locally
         best = mapping_utils.fuzzy_match_value_to_list(raw, candidate_names, threshold=60)
-        return best
+        if best:
+            return best
+
+        # If GPT returned something unexpected, fallback to local fuzzy match
+        local_best = mapping_utils.fuzzy_match_value_to_list(value, candidate_names, threshold=60)
+        if local_best:
+            return local_best
+
+        return None
     except Exception as e:
         logger.error(f"Energy classification GPT call failed: {e}")
-        return None
+        # On error, still attempt local fuzzy matching to be resilient
+        try:
+            return mapping_utils.fuzzy_match_value_to_list(value, candidate_names, threshold=60)
+        except Exception:
+            return None
 
 def map_schema_with_gpt(source_columns: list, dest_schema: dict, source_table_name: str, 
                        calc_method: str, activity_cat: str, activity_sub_cat: str, 

@@ -164,6 +164,20 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
             source_df['ActivityEmissionSourceID'] = source_df[col].str.lower().map(energy_type_map)
             break
 
+    # --- Normalize unit values in unit-like columns (e.g., 'Usage_Unit', 'Usage Unit') ---
+    # This handles cases where units are written as 'm3' and need to be 'm³' for mapping
+    try:
+        from .mapping_utils import normalize_unit
+        unit_like_cols = [c for c in source_df.columns if c.strip().lower() in ('usage_unit', 'usage unit', 'unit', 'unit_name')]
+        for uc in unit_like_cols:
+            try:
+                source_df[uc] = source_df[uc].apply(lambda v: normalize_unit(v) if pd.notna(v) else v)
+            except Exception:
+                # best-effort: coerce to string then normalize
+                source_df[uc] = source_df[uc].astype(str).apply(lambda v: normalize_unit(v))
+    except Exception:
+        pass
+
     source_df = drop_and_log_duplicates(source_df)
     flag_unresolved(mapping, source_df)
     transformed_data = {}

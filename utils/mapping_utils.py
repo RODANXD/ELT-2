@@ -45,6 +45,87 @@ def normalize_unit(unit):
     u = str(unit).strip().lower().replace('^3', '3')
     return mapping.get(u, unit)
 
+
+# Currency symbol -> ISO code mapping (used to detect currencies like 'amount_€' or '€100')
+_CURRENCY_SYMBOL_MAP = {
+    '€': 'EUR',
+    '$': 'USD',
+    '£': 'GBP',
+    '¥': 'JPY',
+    '₹': 'INR',
+    '₩': 'KRW',
+    '₽': 'RUB',
+    '₺': 'TRY',
+    '₪': 'ILS',
+    '₫': 'VND'
+}
+
+def build_currency_symbol_map(currency_df) -> dict:
+    """Build a symbol -> ISO code map from a currency dimension DataFrame.
+
+    Tries to find a symbol column (e.g., 'CurrencySymbol' or containing 'symbol'/'char') and a
+    currency code column (e.g., 'CurrencyCode', 'Code'). Returns a mapping of symbol->ISO code.
+    """
+    if currency_df is None:
+        return {}
+    try:
+        # pick currency code column
+        code_col = None
+        for c in currency_df.columns:
+            if re.search(r'currencycode|currency_code|code|iso3|iso', c, re.I):
+                code_col = c
+                break
+        # pick symbol column
+        sym_col = None
+        for c in currency_df.columns:
+            if re.search(r'symbol|char|sign', c, re.I):
+                sym_col = c
+                break
+
+        mapping = {}
+        if code_col and sym_col:
+            for _, row in currency_df.iterrows():
+                sym = row.get(sym_col)
+                code = row.get(code_col)
+                if pd_notna := (sym is not None and str(sym).strip() != ''):
+                    try:
+                        sym_str = str(sym).strip()
+                        code_str = str(code).strip().upper() if code is not None else None
+                        if code_str and len(code_str) == 3:
+                            mapping[sym_str] = code_str
+                    except Exception:
+                        continue
+        return mapping
+    except Exception:
+        return {}
+
+
+def _currency_code_from_symbol_in_text(text: str, currency_df=None) -> Optional[str]:
+    """Return ISO currency code if any known currency symbol is found in text.
+
+    If `currency_df` is provided, build the symbol map from it first (dynamic). Otherwise
+    fall back to the built-in `_CURRENCY_SYMBOL_MAP`.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    # Try dynamic map first
+    try:
+        if currency_df is not None:
+            dyn_map = build_currency_symbol_map(currency_df)
+            for sym, code in dyn_map.items():
+                if sym and sym in text:
+                    logging.info(f"_currency_code_from_symbol_in_text: Found dynamic symbol '{sym}' -> '{code}' in '{text}'")
+                    return code
+    except Exception:
+        pass
+
+    # Fallback to static map
+    for sym, code in _CURRENCY_SYMBOL_MAP.items():
+        if sym in text:
+            logging.info(f"_currency_code_from_symbol_in_text: Found symbol '{sym}' -> '{code}' in '{text}'")
+            return code
+    return None
+
 import re
 def extract_unit_from_column(col_name):
     """

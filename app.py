@@ -121,9 +121,11 @@ calc_method = st.sidebar.selectbox(
 
 # Only show file uploader and Run Mapping if destination data is ready
 uploaded_file = None
-if dest_ready:
-    uploaded_file = st.file_uploader("Upload SourceData Excel", type=["xlsx"])
-else:
+def _show_file_uploader():
+    return st.file_uploader("Upload SourceData Excel", type=["xlsx"])
+
+# Only show file uploader when destination tables are loaded and after we have necessary org-unit input
+if not dest_ready:
     st.warning("Cannot upload source file until destination schema and reference data load successfully.")
 
 company_mode = st.radio(
@@ -132,6 +134,11 @@ company_mode = st.radio(
     key="company_mode"
 )
 
+# default unit_mode to ensure it's always defined for transform_data call
+unit_mode = "Single unit"
+
+company_mode = st.radio(
+
 if company_mode == "A single company / unit":
     unit_mode = st.radio(
         "Is this data for a single unit or multiple units?",
@@ -139,22 +146,29 @@ if company_mode == "A single company / unit":
         key="unit_mode"
     )
     if unit_mode == "Single unit":
-        org_unit_name = st.text_input("Organizational Unit Name")
+        # Ask the user to provide the single organizational unit name
+        org_unit_name = st.text_input("Organizational Unit Name (this will be created/linked in D_OrganizationalUnit)")
     else:
+        # multiple units under single company
         multi_unit_upload = st.radio(
-            "How are you uploading data?",
-            ["Uploading each unit separately", "All units in one file"],
+            "Are you uploading each organizational unit's data as a separate file?",
+            ["Yes - uploading separately", "No - all units in one file"],
             key="multi_unit_upload"
         )
-        if multi_unit_upload == "Uploading each unit separately":
+        if multi_unit_upload == "Yes - uploading separately":
+            # For separate uploads we ask for the unit name for this upload
             org_unit_name = st.text_input("Organizational Unit Name for this upload")
         else:
-            st.info("Your file must contain an 'organizational_unit' column for AI detection.")
             org_unit_name = None
+            st.info("Please ensure the file you upload contains a column identifying the organizational unit (e.g., 'organizational_unit' or 'unit_name'). The AI will use that column to create/link units.")
 else:
+    # Multiple companies / org units scenario - AI will attempt to auto-detect
     org_unit_name = None
-    st.info("The AI will auto-detect companies & org-units from the file.")
+    st.info("The AI will auto-detect companies & organizational units from the file when possible.")
 
+# Show file uploader now that org-unit inputs are displayed (only if destination data loaded)
+if dest_ready:
+    uploaded_file = _show_file_uploader()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout: Main area with 1 column (content)
