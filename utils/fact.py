@@ -11,6 +11,7 @@ from .progress_state import update_progress
 from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
 from .mapping_utils import normalize_text, normalize_unit, extract_unit_from_column, extract_unit_from_value
 from . import mapping_utils
+from .mapping_utils import clean_provider_name
 # Optional AI-based classification (will be used as a last-resort fallback)
 try:
     from .gpt_mapper import classify_energy_value
@@ -186,14 +187,49 @@ def get_date_key(date_df: pd.DataFrame, source_column: str, year: int, date_valu
         return lookup_value(date_df, 'Year', year, 'DateKey')
     
     # Convert date to datetime
+    import re
+
+    def _parse_ambiguous_8digit(s):
+        s = str(s).strip()
+        if not re.fullmatch(r"\d{8}", s):
+            return pd.NaT
+        # Try YYYYMMDD
+        try:
+            dt1 = pd.to_datetime(s, format="%Y%m%d", errors='coerce')
+        except Exception:
+            dt1 = pd.NaT
+        # Try YYYYDDMM (swap day and month)
+        try:
+            y = s[0:4]
+            d = s[4:6]
+            m = s[6:8]
+            swapped = f"{y}{m}{d}"
+            dt2 = pd.to_datetime(swapped, format="%Y%m%d", errors='coerce')
+        except Exception:
+            dt2 = pd.NaT
+
+        if pd.isna(dt1) and pd.isna(dt2):
+            return pd.NaT
+        if pd.isna(dt1):
+            return dt2
+        if pd.isna(dt2):
+            return dt1
+        # If both are valid, prefer dt1 (assumed correct YYYYMMDD)
+        return dt1
+
     source_date = pd.to_datetime(date_value, errors='coerce')
-    
+
+    # If parsing failed and value is an 8-digit numeric string, try ambiguous parsing
+    if pd.isna(source_date) and isinstance(date_value, (str, int)):
+        parsed = _parse_ambiguous_8digit(date_value)
+        source_date = parsed
+
     if pd.isna(source_date):
         return lookup_value(date_df, 'Year', year, 'DateKey')  # fallback to year
-        
+
     # Convert date to DateKey format (YYYYMMDD)
     date_key = source_date.strftime('%Y%m%d')
-    
+
     # Use the existing lookup function to find the DateKey
     return lookup_value(date_df, 'DateKey', date_key, 'DateKey')
     
@@ -694,7 +730,7 @@ def generate_fact(
                                 logging.info(f"✅ GPT classified '{raw_energy}' to '{choice}' with ID {resolved_emission_source_id}")
                     except Exception as e:
                         logging.warning(f"⚠️ GPT classification failed: {e}")
-
+                
                 # If we still couldn't find a match, log a warning
                 if resolved_emission_source_id is None:
                     logging.warning(f"❌ Could not map energy type '{raw_energy}' to any ActivityEmissionSourceName")
@@ -909,9 +945,6 @@ def generate_fact(
                 logging.info(f"diagnostics: normalized ascii='{norm_ascii}', available_ascii sample={available_ascii[:20]}")
                 logging.info(f"diagnostics: normalized codepoints={cp_norm}")
                 logging.info(f"diagnostics: available codepoints sample={cp_available}")
-        else:
-            logging.warning("⚠️ No unit found in row or headers; UnitID will be set to None")
-            unit_id = None
         
         new_row['UnitID'] = int(unit_id) if unit_id is not None else None
         
@@ -920,11 +953,11 @@ def generate_fact(
         logging.info(f"🔍 [EmissionFactorID] Starting generation process...")
         logging.info(f"🔍 [EmissionFactorID] Pre-generated emission_factor_id: {emission_factor_id}")
         logging.info(f"🔍 [EmissionFactorID] Final resolved ActivityEmissionSourceID: {new_row['ActivityEmissionSourceID']}")
-        
+
         # Always generate EmissionFactorID based on country ISO2Code and final ActivityEmissionSourceName
         country_iso2 = lookup_value(country_df, 'CountryName', country, 'ISO2Code')
         logging.info(f"🔍 [EmissionFactorID] Country: {country}, ISO2Code: {country_iso2}")
-        
+
         # Get ActivityEmissionSourceName if we have ActivityEmissionSourceID
         emission_source_name = None
         if new_row['ActivityEmissionSourceID'] is not None:
@@ -933,23 +966,21 @@ def generate_fact(
             ]
             if not emission_source_name_lookup.empty:
                 emission_source_name = emission_source_name_lookup['ActivityEmissionSourceName'].iloc[0]
-                logging.info(f"🔍 [EmissionFactorID] Found emission source name: '{emission_source_name}' for ID {new_row['ActivityEmissionSourceID']}")
-            else:
-                logging.warning(f"⚠️ [EmissionFactorID] No emission source found for ID {new_row['ActivityEmissionSourceID']}")
+            logging.info(f"🔍 [EmissionFactorID] Found emission source name: '{emission_source_name}' for ID {new_row['ActivityEmissionSourceID']}")
         else:
-            logging.warning(f"⚠️ [EmissionFactorID] ActivityEmissionSourceID is None, cannot generate EmissionFactorID")
-        
-        if country_iso2 and emission_source_name:
+            logging.warning(f"⚠️ [EmissionFactorID] No emission source found for ID {new_row['ActivityEmissionSourceID']}")
+
+        if emission_source_name and country_iso2:
             # Debug: show what emission_source_name lookup returned
             try:
                 logging.info(f"🔍 [EmissionFactorID] Emission source lookup details: {emission_source_name_lookup.to_dict(orient='list')}")
             except Exception as e:
                 logging.warning(f"⚠️ [EmissionFactorID] Error showing emission source lookup details: {e}")
-            
+
             # Format the EmissionFactorID as ISO2Code_ActivityEmissionSourceName with spaces replaced by underscores
             new_row['EmissionFactorID'] = f"{country_iso2}_{str(emission_source_name).strip().replace(' ', '_')}"
             logging.info(f"✅ [EmissionFactorID] Generated new EmissionFactorID: '{new_row['EmissionFactorID']}' (country_iso2='{country_iso2}', emission_source_name='{emission_source_name}')")
-            
+
             # Log the difference if pre-generated was different
             if emission_factor_id and emission_factor_id != new_row['EmissionFactorID']:
                 logging.warning(f"⚠️ [EmissionFactorID] Pre-generated was '{emission_factor_id}', but corrected to '{new_row['EmissionFactorID']}' based on actual data")
@@ -958,7 +989,7 @@ def generate_fact(
                 logging.error(f"❌ [EmissionFactorID] Missing country_iso2 for EmissionFactorID generation")
             if not emission_source_name:
                 logging.error(f"❌ [EmissionFactorID] Missing emission_source_name for EmissionFactorID generation")
-            
+
             # Fallback: try to use pre-generated if available, otherwise use unknown
             if emission_factor_id:
                 logging.warning(f"⚠️ [EmissionFactorID] Using pre-generated as fallback: {emission_factor_id}")
@@ -1111,86 +1142,78 @@ def generate_fact(
             if field_name == 'CurrencyID':
                 if source_column and source_column in source_df.columns:
                     currency_code = source_row[source_column]
-                    
-                    # Check if currency_code is numeric (like 103.13) - if so, extract from column name
-                    if pd.notna(currency_code) and currency_code is not None:
-                        try:
-                            # Try to convert to float to check if it's numeric
-                            float(currency_code)
-                            # If we get here, currency_code is numeric - extract currency from column name
-                            logging.info(f"💸 [CurrencyID] Source column '{source_column}' contains numeric value '{currency_code}' - extracting currency from column name")
-                            from .mapping_utils import extract_currency_from_column, _currency_code_from_symbol_in_text, extract_currency_from_value, build_currency_symbol_map
-                            extracted_currency = extract_currency_from_column(source_column)
-                            # If column name contains currency symbol like amount_€, map symbol to ISO code
-                            if not extracted_currency:
-                                # pass dest_tables DE1_Currency if available to build dynamic map
-                                currency_df_for_map = None
-                                try:
-                                    if dest_tables and 'DE1_Currency' in dest_tables:
-                                        currency_df_for_map = dest_tables['DE1_Currency']
-                                except Exception:
-                                    currency_df_for_map = None
-                                sym_code = _currency_code_from_symbol_in_text(source_column, currency_df_for_map)
-                                if sym_code:
-                                    extracted_currency = sym_code
-                            # If still not found, try to detect symbol in the value itself (e.g., '€100') using dynamic map
-                            if not extracted_currency:
-                                # try to detect symbol in the value (e.g., '€100')
-                                extracted_currency = extract_currency_from_value(currency_code)
-                                if not extracted_currency:
-                                    # try symbol based on destination currency table
-                                    try:
-                                        extracted_currency = _currency_code_from_symbol_in_text(str(currency_code), currency_df_for_map)
-                                    except Exception:
-                                        pass
-                            logging.info(f"🔍💱 [CurrencyID] Column name: '{source_column}', Extracted currency: '{extracted_currency}'")
-                            if extracted_currency:
-                                # Check if this currency exists in our currency dimension table
-                                logging.info(f"🔍💱 [CurrencyID] Looking for currency '{extracted_currency}' in currency dimension table")
-                                try:
-                                    if not currency_df.empty:
-                                        available_currencies = currency_df['CurrencyCode'].astype(str).tolist() if 'CurrencyCode' in currency_df.columns else []
-                                        logging.info(f"🔍💱 [CurrencyID] Available currencies in dimension table: {available_currencies}")
-                                    else:
-                                        logging.warning(f"⚠️💱 [CurrencyID] Currency dimension table is empty!")
-                                except Exception as e:
-                                    logging.warning(f"⚠️💱 [CurrencyID] Error checking currency dimension table: {e}")
-                                
-                                currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
-                                if currency_id is not None:
-                                    new_row[field_name] = safe_int_conversion(currency_id)
-                                    logging.info(f"💱 [CurrencyID] Extracted currency '{extracted_currency}' from column name '{source_column}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
-                                else:
-                                    new_row[field_name] = None
-                                    logging.warning(f"⚠️💱 [CurrencyID] Extracted currency '{extracted_currency}' from column name '{source_column}' but not found in currency dimension table")
-                            else:
-                                new_row[field_name] = None
-                                logging.warning(f"⚠️💱 [CurrencyID] Could not extract currency from column name '{source_column}' for numeric value '{currency_code}'")
-                        except (ValueError, TypeError):
-                            # Not numeric, treat as regular currency code
-                            currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
-                            new_row[field_name] = safe_int_conversion(currency_id)
-                            if currency_id is not None:
-                                logging.info(f"💱 [CurrencyID] Mapped currency code '{currency_code}' to CurrencyID '{currency_id}' for row {index+1}")
-                            else:
-                                logging.warning(f"⚠️💱 [CurrencyID] Currency code '{currency_code}' not found in currency dimension table")
-                    else:
-                        # Handle NaN values in currency code
+
+                    # If value is not provided or NaN
+                    if pd.isna(currency_code) or currency_code is None:
                         new_row[field_name] = None
                         logging.info(f"💸 [CurrencyID] Source column '{source_column}' is NaN or None for row {index+1}")
+                        continue
+
+                    # If the cell contains a numeric value (e.g., '150.25'), try to infer currency from header or nearby values/symbols
+                    try:
+                        float(currency_code)
+                        logging.info(f"💸 [CurrencyID] Source column '{source_column}' contains numeric value '{currency_code}' - extracting currency from column name/value")
+                        from .mapping_utils import extract_currency_from_column, _currency_code_from_symbol_in_text, extract_currency_from_value
+
+                        # Try header-based extraction first
+                        extracted_currency = extract_currency_from_column(source_column)
+
+                        # Try dynamic symbol lookup using destination currency table
+                        currency_df_for_map = None
+                        try:
+                            if dest_tables and 'DE1_Currency' in dest_tables:
+                                currency_df_for_map = dest_tables['DE1_Currency']
+                        except Exception:
+                            currency_df_for_map = None
+
+                        if not extracted_currency:
+                            sym_code = _currency_code_from_symbol_in_text(source_column, currency_df_for_map)
+                            if sym_code:
+                                extracted_currency = sym_code
+
+                        # If still not found, try to detect symbol in the value (e.g., '€100') or value-based codes
+                        if not extracted_currency:
+                            extracted_currency = extract_currency_from_value(currency_code)
+                            if not extracted_currency and currency_df_for_map is not None:
+                                try:
+                                    extracted_currency = _currency_code_from_symbol_in_text(str(currency_code), currency_df_for_map)
+                                except Exception:
+                                    pass
+
+                        logging.info(f"🔍💱 [CurrencyID] Column name: '{source_column}', Extracted currency: '{extracted_currency}'")
+
+                        if extracted_currency:
+                            currency_id = lookup_value(currency_df, 'CurrencyCode', extracted_currency, 'CurrencyID')
+                            if currency_id is not None:
+                                new_row[field_name] = safe_int_conversion(currency_id)
+                                logging.info(f"💱 [CurrencyID] Extracted currency '{extracted_currency}' from column '{source_column}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
+                            else:
+                                new_row[field_name] = None
+                                logging.warning(f"⚠️💱 [CurrencyID] Extracted currency '{extracted_currency}' from column '{source_column}' but not found in currency dimension table")
+                        else:
+                            new_row[field_name] = None
+                            logging.warning(f"⚠️💱 [CurrencyID] Could not extract currency from column name '{source_column}' for numeric value '{currency_code}'")
+
+                    except (ValueError, TypeError):
+                        # Not numeric, treat as regular currency code/value
+                        currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                        new_row[field_name] = safe_int_conversion(currency_id)
+                        if currency_id is not None:
+                            logging.info(f"💱 [CurrencyID] Mapped currency code '{currency_code}' to CurrencyID '{currency_id}' for row {index+1}")
+                        else:
+                            logging.warning(f"⚠️💱 [CurrencyID] Currency code '{currency_code}' not found in currency dimension table")
                 else:
                     # Enhanced currency detection from column names if no explicit mapping
                     detected_currency = None
-                    
+
                     # Debug: Show what we're working with
                     logging.info(f"🔍💱 [CurrencyID] Row {index+1}: Starting enhanced currency detection...")
                     logging.info(f"🔍💱 [CurrencyID] Available columns: {list(source_df.columns)}")
                     logging.info(f"🔍💱 [CurrencyID] Current row values: {dict(source_row)}")
-                    
-                    # Step 1: Check column names for currency patterns (e.g., TotalPaid(EUR), amount_USD)
+
+                    # Step 1: Check column names for currency patterns (e.g., TotalPaid(EUR), amount_USD, amount_€)
                     logging.info(f"🔍💱 [CurrencyID] No explicit mapping - checking column names for currency patterns...")
-                    
-                    # Debug: Show available currencies in dimension table
+
                     try:
                         if not currency_df.empty:
                             available_currencies = currency_df['CurrencyCode'].astype(str).tolist() if 'CurrencyCode' in currency_df.columns else []
@@ -1199,7 +1222,7 @@ def generate_fact(
                             logging.warning(f"⚠️💱 [CurrencyID] Currency dimension table is empty!")
                     except Exception as e:
                         logging.warning(f"⚠️💱 [CurrencyID] Error checking currency dimension table: {e}")
-                    
+
                     for col in source_df.columns:
                         from .mapping_utils import extract_currency_from_column
                         extracted_currency = extract_currency_from_column(col)
@@ -1211,44 +1234,45 @@ def generate_fact(
                                 detected_currency = currency_id
                                 logging.info(f"🔍💱 [CurrencyID] Auto-detected currency '{extracted_currency}' from column '{col}' and mapped to CurrencyID '{currency_id}' for row {index+1}")
                                 break
-                    
-                    # Step 2: If no currency found in column names, check data values for currency codes
+
+                    # Step 2: If no currency found in column names, check data values for currency codes or symbols
                     if detected_currency is None:
-                        logging.info(f"🔍💱 [CurrencyID] No currency found in column names - checking data values for currency codes...")
+                        logging.info(f"🔍💱 [CurrencyID] No currency found in column names - checking data values for currency codes/symbols...")
                         try:
-                            from .mapping_utils import extract_currency_from_value
-                            
-                            # Check a few sample rows for currency patterns
-                            sample_rows = source_df.head(10)  # Check first 10 rows
+                            from .mapping_utils import extract_currency_from_value, _currency_code_from_symbol_in_text
+
+                            sample_rows = source_df.head(10)
                             found_currencies = set()
-                            
+
                             for _, sample_row in sample_rows.iterrows():
                                 for col_name, value in sample_row.items():
                                     if pd.notna(value):
-                                        # Use the new extract_currency_from_value function
                                         extracted_currency = extract_currency_from_value(value)
                                         if extracted_currency:
                                             found_currencies.add(extracted_currency.upper())
-                            
+                                        else:
+                                            # Try symbol detection in the value
+                                            sym_code = _currency_code_from_symbol_in_text(str(value), currency_df if not currency_df.empty else None)
+                                            if sym_code:
+                                                found_currencies.add(sym_code.upper())
+
                             logging.info(f"🔍💱 [CurrencyID] Found currency codes in data values: {found_currencies}")
-                            
-                            # Try to match found currencies with our currency dimension table
+
                             for found_currency in found_currencies:
                                 currency_id = lookup_value(currency_df, 'CurrencyCode', found_currency, 'CurrencyID')
                                 if currency_id is not None:
                                     detected_currency = currency_id
                                     logging.info(f"🔍💱 [CurrencyID] Auto-detected currency '{found_currency}' from data values and mapped to CurrencyID '{currency_id}' for row {index+1}")
                                     break
-                                    
+
                         except Exception as e:
                             logging.warning(f"⚠️💱 [CurrencyID] Error while checking data values for currency: {e}")
-                    
+
                     # Step 3: Apply the detected currency or fallback
                     if detected_currency is not None:
                         new_row[field_name] = safe_int_conversion(detected_currency)
                         logging.info(f"✅💱 [CurrencyID] Successfully mapped currency for row {index+1}")
                     elif not currency_df.empty:
-                        # Fallback to default currency
                         new_row[field_name] = safe_int_conversion(currency_df['CurrencyID'].iloc[0])
                         logging.info(f"⚠️💱 [CurrencyID] No explicit or detected currency, using default CurrencyID '{currency_df['CurrencyID'].iloc[0]}' for row {index+1}")
                     else:

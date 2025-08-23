@@ -1,4 +1,5 @@
 import re
+import pandas as pd
 from typing import List, Optional
 import logging
 from fuzzywuzzy import process
@@ -255,6 +256,15 @@ def extract_currency_from_column(col_name):
         if len(currency_code) == 3 and currency_code.isalpha():
             logging.info(f"extract_currency_from_column: Found currency '{currency_code}' in column '{col_name}' using standalone pattern")
             return currency_code
+
+    # Priority 6: Look for currency symbols in the column name (e.g., amount_€, amount_$)
+    try:
+        sym_code = _currency_code_from_symbol_in_text(col_name)
+        if sym_code:
+            logging.info(f"extract_currency_from_column: Found currency symbol in column '{col_name}' -> '{sym_code}'")
+            return sym_code
+    except Exception:
+        pass
     
     logging.info(f"extract_currency_from_column: No currency found in column '{col_name}'")
     return None
@@ -336,7 +346,62 @@ def extract_currency_from_value(value):
         if len(currency_code) == 3 and currency_code.isalpha():
             logging.info(f"extract_currency_from_value: Found currency '{currency_code}' in value '{value_str}' using standalone pattern")
             return currency_code
+
+    # Pattern 5: Look for currency symbols in the value (e.g., '€100', 'A$ 50')
+    try:
+        sym_code = _currency_code_from_symbol_in_text(value_str)
+        if sym_code:
+            logging.info(f"extract_currency_from_value: Found currency symbol in value '{value_str}' -> '{sym_code}'")
+            return sym_code
+    except Exception:
+        pass
     
     logging.info(f"extract_currency_from_value: No currency found in value '{value_str}'")
     return None
+
+
+def clean_provider_name(value: Optional[str]) -> Optional[str]:
+    """
+    Clean provider/supplier strings by removing common prefixes/suffixes and identifiers.
+
+    Examples:
+    - 'Acct:Vienna Power Co.#56775' -> 'Vienna Power Co.'
+    - 'Acct:GreenWatt GmbH#82567' -> 'GreenWatt GmbH'
+    - 'Provider - My Supplier (ID: 1234)' -> 'My Supplier'
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # Normalize whitespace and common unicode dashes
+    s = re.sub(r'[\u2012\u2013\u2014\u2015]', '-', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    # Remove common leading labels like 'Acct:', 'Account', 'Provider', 'Supplier'
+    s = re.sub(r'^(?:acct(?:ount)?|account|supplier|provider)\s*[:\-–—]*\s*', '', s, flags=re.I)
+
+    # Remove common trailing identifiers (e.g., '#12345', '(#12345)', 'ID:1234', '- 5678')
+    trailing_patterns = [
+        r'\s*#\s*\d+\s*$',
+        r'\s*\(\s*#?\s*\d+\s*\)\s*$',
+        r'\s*\bID[:\s]*\d+\s*$',
+        r'\s*[-–—]\s*\d+\s*$',
+        r'\s*ref[:\s]*\d+\s*$',
+        r'\s*:\s*\d+\s*$',
+        r'\s*\b\d{3,}\s*$'  # long trailing numbers
+    ]
+
+    for pat in trailing_patterns:
+        s = re.sub(pat, '', s, flags=re.I).strip()
+
+    # Remove surrounding noise characters
+    s = s.strip(' -_\n\t\r:;,./\\()')
+
+    # Collapse multiple spaces
+    s = re.sub(r'\s{2,}', ' ', s)
+
+    # Final fallback: if result is empty, return None
+    return s if s else None
 

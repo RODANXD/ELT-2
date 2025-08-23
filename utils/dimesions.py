@@ -4,6 +4,7 @@ from fuzzywuzzy import fuzz
 import logger
 from .schema_analyzer import _infer_currency_hints_from_headers, _infer_unit_hints_from_headers
 from .mapping_utils import extract_unit_from_column, normalize_unit
+from . import mapping_utils
 import re 
 def get_next_incremental_id(df: pd.DataFrame, column_name: str):
     """Get next incremental ID for auto-increment columns"""
@@ -126,12 +127,52 @@ def transform_D_Date(mapping, source_df, ReportingYear) -> pd.DataFrame:
         # Get the date column and convert to datetime
         raw = source_df[mapping['DateKey']['source_column']].astype(str).str.strip()
 
-        # 1st attempt: ISO-like YYYY/MM/DD
+        # Detect 8-digit numeric dates which may be in YYYYDDMM format (e.g., 20231201 vs 20230112 ambiguity)
+        # If a value matches 8 digits, try parsing both YYYYMMDD and YYYYDDMM and pick the one that yields a valid month (1-12)
+        def _parse_ambiguous_8digit(s):
+            s = str(s).strip()
+            if not re.fullmatch(r"\d{8}", s):
+                return pd.NaT
+            # Try YYYYMMDD
+            try:
+                dt1 = pd.to_datetime(s, format="%Y%m%d", errors='coerce')
+            except Exception:
+                dt1 = pd.NaT
+            # Try YYYYDDMM (swap day and month)
+            try:
+                y = s[0:4]
+                d = s[4:6]
+                m = s[6:8]
+                swapped = f"{y}{m}{d}"
+                dt2 = pd.to_datetime(swapped, format="%Y%m%d", errors='coerce')
+            except Exception:
+                dt2 = pd.NaT
+
+            # Prefer the one with a valid month/day (month between 1-12)
+            if pd.isna(dt1) and pd.isna(dt2):
+                return pd.NaT
+            if pd.isna(dt1):
+                return dt2
+            if pd.isna(dt2):
+                return dt1
+            # If both valid, choose dt1 (YYYYMMDD) as default
+            return dt1
+
+        # First pass: try normal parsing with pandas
         date_col = pd.to_datetime(raw, errors='coerce', dayfirst=False)
+
+        # For any still-NaT entries, attempt ambiguous 8-digit handling
+        mask_na = date_col.isna()
+        if mask_na.any():
+            parsed = raw.loc[mask_na].apply(_parse_ambiguous_8digit)
+            # parsed may be dtype object with Timestamps/NaT; convert to DatetimeIndex
+            parsed_dt = pd.to_datetime(parsed, errors='coerce')
+            date_col.loc[mask_na] = parsed_dt
 
         # 2nd attempt: European DD/MM/YYYY if still NaT
         mask = date_col.isna()
-        date_col.loc[mask] = pd.to_datetime(raw.loc[mask], errors='coerce', dayfirst=True)
+        if mask.any():
+            date_col.loc[mask] = pd.to_datetime(raw.loc[mask], errors='coerce', dayfirst=True)
         
         # Calculate quarter start dates (first day of the quarter)
         quarter_start = date_col.dt.to_period('Q').dt.start_time
@@ -216,6 +257,24 @@ def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFr
         if extracted_currency:
             candidate_codes.add(extracted_currency)
             print(f"transform_D_Currency: extracted currency '{extracted_currency}' from column header '{col}'")
+        else:
+            # Try dynamic symbol lookup using destination currency table (preferred over static map)
+            try:
+                # show dynamic mapping for debugging
+                try:
+                    dyn_map = mapping_utils.build_currency_symbol_map(dest_df)
+                    if dyn_map:
+                        print(f"transform_D_Currency: dynamic currency symbol map from dest table: {dyn_map}")
+                except Exception:
+                    dyn_map = {}
+
+                sym_code = mapping_utils._currency_code_from_symbol_in_text(col, dest_df)
+                if sym_code:
+                    candidate_codes.add(sym_code)
+                    print(f"transform_D_Currency: extracted currency '{sym_code}' from column header '{col}' via symbol using dest table")
+            except Exception:
+                # fallback ignored
+                pass
 
     # If still empty, scan sample values in the source data for currency tokens like 'EUR'
     if not candidate_codes:
@@ -235,6 +294,30 @@ def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFr
                     candidate_codes.add(m.group(1).upper())
             if candidate_codes:
                 print(f"transform_D_Currency: inferred currency codes from data values: {candidate_codes}")
+        except Exception:
+            # ignore scanning errors
+            sample_vals = []
+
+        # Also scan for currency symbols (€, $, £, ₹, etc.) and map them to ISO codes
+        try:
+            # Prefer dynamic symbol map from destination currency table if available
+            from . import mapping_utils
+            for v in sample_vals:
+                try:
+                    code = mapping_utils._currency_code_from_symbol_in_text(str(v), dest_df)
+                    if code:
+                        candidate_codes.add(code)
+                except Exception:
+                    # fallback to static detection inside mapping_utils
+                    try:
+                        code = mapping_utils._currency_code_from_symbol_in_text(str(v))
+                        if code:
+                            candidate_codes.add(code)
+                    except Exception:
+                        pass
+
+            if candidate_codes:
+                print(f"transform_D_Currency: inferred currency codes from symbols in data values: {candidate_codes}")
         except Exception:
             pass
     
@@ -264,12 +347,62 @@ def transform_D_Currency(mapping, source_df, dest_df: pd.DataFrame) -> pd.DataFr
         print(f"transform_D_Currency: destination currency column not found in {list(dest_df.columns)}")
         return df
 
+    # Also attempt to detect currency symbols in the source data
+    detected_symbols = set()
+    try:
+        # collect sample values if not already collected
+        sample_vals_local = []
+        for col in source_df.columns:
+            try:
+                vals = source_df[col].dropna().astype(str).head(50).tolist()
+                sample_vals_local.extend(vals)
+            except Exception:
+                continue
+
+        # dynamic symbol map from destination table
+        dyn_map = mapping_utils.build_currency_symbol_map(dest_df) if dest_df is not None else {}
+        # check both dynamic and static symbol sets
+        symbol_candidates = list(dyn_map.keys()) + list(mapping_utils._CURRENCY_SYMBOL_MAP.keys())
+        # longer tokens first
+        symbol_candidates = sorted(set(symbol_candidates), key=len, reverse=True)
+        for v in sample_vals_local:
+            for sym in symbol_candidates:
+                if sym and sym in v:
+                    detected_symbols.add(sym)
+        if detected_symbols:
+            print(f"transform_D_Currency: detected symbols in data values: {detected_symbols}")
+    except Exception:
+        detected_symbols = set()
+
+    # Build final match mask using either currency code or symbol (if available)
+    mask_code = pd.Series([False] * len(dest_df))
     if candidate_codes:
-        mask = dest_df[currency_code_col].astype(str).str.upper().isin(candidate_codes)
-        print(f"transform_D_Currency: using dest column '{currency_code_col}' to match candidate codes; mask sum={mask.sum()} out of {len(dest_df)} rows")
-        filtered = dest_df[mask].copy().reset_index(drop=True)
-        df = pd.concat([df, filtered], ignore_index=True)
-    else:
+        mask_code = dest_df[currency_code_col].astype(str).str.upper().isin(candidate_codes)
+        print(f"transform_D_Currency: using dest column '{currency_code_col}' to match candidate codes; mask sum={mask_code.sum()} out of {len(dest_df)} rows")
+
+    mask_symbol = pd.Series([False] * len(dest_df))
+    # try to find a symbol column in destination table
+    symbol_col = None
+    try:
+        for c in dest_df.columns:
+            if re.search(r'symbol|char|sign', c, re.I):
+                symbol_col = c
+                break
+    except Exception:
+        symbol_col = None
+
+    if symbol_col and detected_symbols:
+        try:
+            mask_symbol = dest_df[symbol_col].astype(str).isin(detected_symbols)
+            print(f"transform_D_Currency: using dest symbol column '{symbol_col}' to match detected symbols; mask sum={mask_symbol.sum()} out of {len(dest_df)} rows")
+        except Exception:
+            mask_symbol = pd.Series([False] * len(dest_df))
+
+    mask = mask_code | mask_symbol
+    filtered = dest_df[mask].copy().reset_index(drop=True)
+    df = pd.concat([df, filtered], ignore_index=True)
+
+    if df.empty:
         print("transform_D_Currency: No candidate currency codes found; returning empty currency df")
 
     return df
@@ -297,9 +430,10 @@ def transform_emission_source_provider(mapping: dict, source_df: pd.DataFrame, d
     providers = source_df[source_column].dropna().unique()
 
     for idx, provider in enumerate(providers):
+        cleaned = mapping_utils.clean_provider_name(provider) if provider is not None else None
         new_row = {
             'ActivityEmissionSourceProviderID': idx + 1,  # Start with ID 1 for new table
-            'ProviderName': provider
+            'ProviderName': cleaned if cleaned else provider
         }
         # Ensure ID is int type
         new_row['ActivityEmissionSourceProviderID'] = int(new_row['ActivityEmissionSourceProviderID'])
