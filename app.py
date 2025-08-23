@@ -128,16 +128,20 @@ def _show_file_uploader():
 if not dest_ready:
     st.warning("Cannot upload source file until destination schema and reference data load successfully.")
 
-company_mode = st.radio(
-    "Does the company already exist?",
-    ["A single company / unit", "Multiple companies or organizational units"],
-    key="company_mode"
+org_choice = st.radio(
+    "Organizational structure",
+    ["Single organizational unit", "Multiple organizational units"],
+    key="org_structure"
 )
+
+# Map UI choice to internal company_mode values used by transform_data
+if org_choice == "Single organizational unit":
+    company_mode = "A single company / unit"
+else:
+    company_mode = "Multiple companies or organizational units"
 
 # default unit_mode to ensure it's always defined for transform_data call
 unit_mode = "Single unit"
-
-company_mode = st.radio(
 
 if company_mode == "A single company / unit":
     unit_mode = st.radio(
